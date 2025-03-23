@@ -17,6 +17,7 @@ import os
 from numba import njit, prange
 import colorsys
 import platform
+import random
 
 # --------------------------------------------------------------------------
 # COLOR THEME MAPPING (Vectorized)
@@ -256,7 +257,7 @@ class MandelbrotViewer:
         
         self.theme_label = ttk.Label(self.control_frame, text="Color Theme:")
         self.theme_label.grid(row=0, column=2, padx=5, pady=5)
-        self.themes = ["Default", "Grayscale", "Blue", "Fire", "Rainbow", "Rainbow2", "Rainbow3", "Rainbow4"]
+        self.themes = ["Default", "Grayscale", "Blue", "Fire", "Rainbow", "Rainbow2", "Rainbow3", "Rainbow4", "CPU Cores"]
         self.color_theme_var = tk.StringVar(value=self.color_theme)
         self.theme_menu = ttk.OptionMenu(self.control_frame, self.color_theme_var, self.color_theme,
                                          *self.themes, command=self.theme_changed)
@@ -398,11 +399,18 @@ class MandelbrotViewer:
         num_sections = 2 ** int(np.floor(np.log2(self.num_cores)))
         section_width = self.width // num_sections
         
-        tasks = [
-            (i, section_width, self.width, self.height,
-             self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, self.color_theme)
-            for i in range(num_sections)
-        ]
+        if self.color_theme == "CPU Cores":
+            tasks = [
+                (i, section_width, self.width, self.height,
+                self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes))
+                for i in range(num_sections)
+            ]
+        else:
+            tasks = [
+                (i, section_width, self.width, self.height,
+                self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, self.color_theme)
+                for i in range(num_sections)
+            ]
         
         section_arrays = self.pool.starmap(self.calculator.calculate_section, tasks)
         full_array = np.hstack(section_arrays)
