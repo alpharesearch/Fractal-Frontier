@@ -712,24 +712,17 @@ class MandelbrotViewer:
     
     def reset_view(self):
         """
-        Reset the view to the default parameters and switch to Mandelbrot.
+        Reset the view to the default parameters
         """
-        self.fractal_type_var.set("Mandelbrot")  # Reset fractal type to Mandelbrot
-        self.x_min = -2.0
-        self.x_max = 1.0
-        self.y_min = -1.5
-        self.y_max = 1.5
+        self.fractal_type_changed(self.fractal_type_var.get())  
         self.offset_scale.set(0)
         self.color_theme = "Default"
         self.color_theme_var.set(self.color_theme)
         self.auto_adjust = True
         self.auto_adjust_var.set(self.auto_adjust)
-
-        # Hide Julia C input fields
-        self.julia_c_label.grid_remove()
-        self.julia_c_real_entry.grid_remove()
-        self.julia_c_imag_entry.grid_remove()
-
+        self.julia_c = complex(-0.7, 0.27015)
+        self.julia_c_real_var.set(self.julia_c.real)
+        self.julia_c_imag_var.set(self.julia_c.imag)
         self.draw_mandelbrot()
     
     def zoom(self, event, zoom_factor):
