@@ -367,6 +367,25 @@ class MandelbrotViewer:
                                                 *self.fractal_types, command=self.fractal_type_changed)
         self.fractal_type_menu.grid(row=0, column=5, padx=5, pady=5)
         
+        # Add input fields for julia_c in the control frame
+        self.julia_c_label = ttk.Label(self.control_frame, text="Julia C:")
+        self.julia_c_label.grid(row=2, column=0, padx=5, pady=5)
+
+        self.julia_c_real_var = tk.DoubleVar(value=-0.7)  # Default real part
+        self.julia_c_real_entry = ttk.Entry(self.control_frame, textvariable=self.julia_c_real_var, width=10)
+        self.julia_c_real_entry.grid(row=2, column=1, padx=5, pady=5)
+        self.julia_c_real_entry.bind("<Return>", self.update_julia_c)
+
+        self.julia_c_imag_var = tk.DoubleVar(value=0.27015)  # Default imaginary part
+        self.julia_c_imag_entry = ttk.Entry(self.control_frame, textvariable=self.julia_c_imag_var, width=10)
+        self.julia_c_imag_entry.grid(row=2, column=2, padx=5, pady=5)
+        self.julia_c_imag_entry.bind("<Return>", self.update_julia_c)
+
+        # Hide Julia C input fields initially
+        self.julia_c_label.grid_remove()
+        self.julia_c_real_entry.grid_remove()
+        self.julia_c_imag_entry.grid_remove()
+
         self.canvas.bind("<Button-1>", lambda event: self.fluid_zoom(event, 0.125))
         self.canvas.bind("<Button-2>", self.advance_theme)
         self.canvas.bind("<Button-3>", lambda event: self.fluid_zoom(event, 8))
@@ -559,6 +578,14 @@ class MandelbrotViewer:
             "max_iterations": self.max_iterations,
             "auto_iterations": self.auto_iterations,
         }
+
+        # Add julia_c to the bookmark if the fractal type is Julia
+        if self.fractal_type_var.get() == "Julia":
+            bookmark["julia_c"] = {
+                "real": self.julia_c.real,
+                "imag": self.julia_c.imag
+            }
+
         file_path = "bookmarks.json"
         bookmarks = []
         if os.path.exists(file_path):
@@ -642,8 +669,18 @@ class MandelbrotViewer:
             self.auto_adjust = bm.get("auto_adjust", True)
             self.auto_adjust_var.set(self.auto_adjust)  # Update the checkbox state
             self.fractal_type_var.set(bm.get("fractal_type", "Mandelbrot"))  # Load the fractal type
-            if bm.get("fractal_type", "Mandelbrot") == "Julia":
-                self.julia_c = bm.get("julia_c", complex(-0.7, 0.27015))
+            if self.fractal_type_var.get() == "Julia":
+                julia_c_data = bm.get("julia_c", {"real": -0.7, "imag": 0.27015})
+                self.julia_c = complex(julia_c_data["real"], julia_c_data["imag"])  # Reconstruct the complex number
+                self.julia_c_real_var.set(self.julia_c.real)  # Update the real part input field
+                self.julia_c_imag_var.set(self.julia_c.imag)  # Update the imaginary part input field
+                self.julia_c_label.grid()
+                self.julia_c_real_entry.grid()
+                self.julia_c_imag_entry.grid()
+            else:
+                self.julia_c_label.grid_remove()
+                self.julia_c_real_entry.grid_remove()
+                self.julia_c_imag_entry.grid_remove()
             self.draw_mandelbrot()
             lb_window.destroy()
 
@@ -687,6 +724,12 @@ class MandelbrotViewer:
         self.color_theme_var.set(self.color_theme)
         self.auto_adjust = True
         self.auto_adjust_var.set(self.auto_adjust)
+
+        # Hide Julia C input fields
+        self.julia_c_label.grid_remove()
+        self.julia_c_real_entry.grid_remove()
+        self.julia_c_imag_entry.grid_remove()
+
         self.draw_mandelbrot()
     
     def zoom(self, event, zoom_factor):
@@ -873,13 +916,37 @@ class MandelbrotViewer:
         if value == "Mandelbrot":
             self.x_min, self.x_max = -2.0, 1.0
             self.y_min, self.y_max = -1.5, 1.5
+            # Hide Julia C input fields
+            self.julia_c_label.grid_remove()
+            self.julia_c_real_entry.grid_remove()
+            self.julia_c_imag_entry.grid_remove()
         elif value == "Julia":
             self.x_min, self.x_max = -1.5, 1.5
             self.y_min, self.y_max = -1.5, 1.5
             self.julia_c = complex(-0.7, 0.27015)  # Example Julia constant
+            # Show Julia C input fields
+            self.julia_c_label.grid()
+            self.julia_c_real_entry.grid()
+            self.julia_c_imag_entry.grid()
         elif value == "Fatou":
             self.x_min, self.x_max = -2.0, 2.0
             self.y_min, self.y_max = -2.0, 2.0
+            # Hide Julia C input fields
+            self.julia_c_label.grid_remove()
+            self.julia_c_real_entry.grid_remove()
+            self.julia_c_imag_entry.grid_remove()
+        self.draw_mandelbrot()
+
+    def update_julia_c(self, event=None):
+        """
+        Update the Julia set constant based on input fields.
+        
+        Args:
+            event: Event object, optional
+        """
+        real_part = self.julia_c_real_var.get()
+        imag_part = self.julia_c_imag_var.get()
+        self.julia_c = complex(real_part, imag_part)
         self.draw_mandelbrot()
 
     def __del__(self):
