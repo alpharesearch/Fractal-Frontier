@@ -331,7 +331,8 @@ class MandelbrotViewer:
         
         self.theme_label = ttk.Label(self.control_frame, text="Color Theme:")
         self.theme_label.grid(row=0, column=2, padx=5, pady=5)
-        self.themes = ["Default", "Grayscale", "Blue", "Fire", "Rainbow", "Rainbow2", "Rainbow3", "Rainbow4", "CPU Cores"]
+        self.CPU_CORES_THEME = "CPU Cores"
+        self.themes = ["Default", "Grayscale", "Blue", "Fire", "Rainbow", "Rainbow2", "Rainbow3", "Rainbow4", self.CPU_CORES_THEME]
         self.color_theme_var = tk.StringVar(value=self.color_theme)
         self.theme_menu = ttk.OptionMenu(self.control_frame, self.color_theme_var, self.color_theme,
                                          *self.themes, command=self.theme_changed)
@@ -483,7 +484,7 @@ class MandelbrotViewer:
         fractal_type = self.fractal_type_var.get()
         tasks = []
         if (fractal_type == "Mandelbrot"):
-            if self.color_theme == "CPU Cores":
+            if self.color_theme == self.CPU_CORES_THEME:
                 tasks = [
                     (i, section_width, self.width, self.height,
                     self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes))
@@ -497,7 +498,7 @@ class MandelbrotViewer:
                 ]
             section_arrays = self.pool.starmap(self.calculator.calculate_mandelbrot_section, tasks)
         elif fractal_type == "Julia":
-            if self.color_theme == "CPU Cores":
+            if self.color_theme == self.CPU_CORES_THEME:
                 tasks = [
                     (i, section_width, self.width, self.height,
                     self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes), self.julia_c)
@@ -511,7 +512,7 @@ class MandelbrotViewer:
                 ]
             section_arrays = self.pool.starmap(self.calculator.calculate_julia_section, tasks)
         elif fractal_type == "Fatou":
-            if self.color_theme == "CPU Cores":
+            if self.color_theme == self.CPU_CORES_THEME:
                 tasks = [
                     (i, section_width, self.width, self.height,
                     self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes))
@@ -556,7 +557,7 @@ class MandelbrotViewer:
             "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
             "zoom_level": self.base_range / (self.x_max - self.x_min),
             "max_iterations": self.max_iterations,
-            "auto_iterations": self.auto_iterations
+            "auto_iterations": self.auto_iterations,
         }
         file_path = "bookmarks.json"
         bookmarks = []
@@ -641,6 +642,8 @@ class MandelbrotViewer:
             self.auto_adjust = bm.get("auto_adjust", True)
             self.auto_adjust_var.set(self.auto_adjust)  # Update the checkbox state
             self.fractal_type_var.set(bm.get("fractal_type", "Mandelbrot"))  # Load the fractal type
+            if bm.get("fractal_type", "Mandelbrot") == "Julia":
+                self.julia_c = bm.get("julia_c", complex(-0.7, 0.27015))
             self.draw_mandelbrot()
             lb_window.destroy()
 
