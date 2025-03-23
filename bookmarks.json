@@ -1,0 +1,44 @@
+[
+  {
+    "x_min": -1.5,
+    "x_max": 1.5,
+    "y_min": -1.5,
+    "y_max": 1.5,
+    "iteration_offset": 0,
+    "color_theme": "Default",
+    "auto_adjust": true,
+    "fractal_type": "Julia",
+    "timestamp": "2025-03-23 15:14:19",
+    "zoom_level": 1.0,
+    "max_iterations": 100,
+    "auto_iterations": 100
+  },
+  {
+    "x_min": -0.29374999999999984,
+    "x_max": 0.08124999999999966,
+    "y_min": -1.0446428571428577,
+    "y_max": -0.6696428571428572,
+    "iteration_offset": 0,
+    "color_theme": "Default",
+    "auto_adjust": true,
+    "fractal_type": "Mandelbrot",
+    "timestamp": "2025-03-23 15:23:16",
+    "zoom_level": 8.00000000000001,
+    "max_iterations": 125,
+    "auto_iterations": 125
+  },
+  {
+    "x_min": 0.15467326046504976,
+    "x_max": 0.6207059344185446,
+    "y_min": 0.11754782492498067,
+    "y_max": 0.5835804988784753,
+    "iteration_offset": 0,
+    "color_theme": "CPU Cores",
+    "auto_adjust": true,
+    "fractal_type": "Fatou",
+    "timestamp": "2025-03-23 15:23:55",
+    "zoom_level": 6.437316882848794,
+    "max_iterations": 122,
+    "auto_iterations": 122
+  }
+]

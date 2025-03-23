@@ -174,36 +174,110 @@ def mandelbrot_section_jit(section_index, section_width, width, height,
             section_counts[i, j] = count
     return section_counts
 
+@njit(parallel=True, cache=True)
+def julia_section_jit(section_index, section_width, width, height,
+                      x_min, x_max, y_min, y_max, max_iterations, c):
+    """
+    Calculate Julia set iterations for a section of the image using Numba JIT compilation.
+    
+    Args:
+        section_index (int): Index of the section to calculate
+        section_width (int): Width of the section in pixels
+        width (int): Total width of the image in pixels
+        height (int): Total height of the image in pixels
+        x_min (float): Minimum x-coordinate in the complex plane
+        x_max (float): Maximum x-coordinate in the complex plane
+        y_min (float): Minimum y-coordinate in the complex plane
+        y_max (float): Maximum y-coordinate in the complex plane
+        max_iterations (int): Maximum number of iterations to perform
+        c (complex): Constant for the Julia set
+        
+    Returns:
+        numpy.ndarray: 2D array of iteration counts for the section
+    """
+    section_counts = np.empty((height, section_width), dtype=np.int32)
+    for i in prange(height):
+        for j in range(section_width):
+            global_x = section_index * section_width + j
+            x = x_min + global_x * (x_max - x_min) / width
+            y = y_min + i * (y_max - y_min) / height
+            z = complex(x, y)
+            count = 0
+            while (z.real * z.real + z.imag * z.imag < 4.0) and (count < max_iterations):
+                z = z * z + c
+                count += 1
+            section_counts[i, j] = count
+    return section_counts
+
+@njit(parallel=True, cache=True)
+def fatou_section_jit(section_index, section_width, width, height,
+                      x_min, x_max, y_min, y_max, max_iterations):
+    """
+    Calculate Fatou set iterations for a section of the image using Numba JIT compilation.
+    
+    Args:
+        section_index (int): Index of the section to calculate
+        section_width (int): Width of the section in pixels
+        width (int): Total width of the image in pixels
+        height (int): Total height of the image in pixels
+        x_min (float): Minimum x-coordinate in the complex plane
+        x_max (float): Maximum x-coordinate in the complex plane
+        y_min (float): Minimum y-coordinate in the complex plane
+        y_max (float): Maximum y-coordinate in the complex plane
+        max_iterations (int): Maximum number of iterations to perform
+        
+    Returns:
+        numpy.ndarray: 2D array of iteration counts for the section
+    """
+    section_counts = np.empty((height, section_width), dtype=np.int32)
+    for i in prange(height):
+        for j in range(section_width):
+            global_x = section_index * section_width + j
+            x = x_min + global_x * (x_max - x_min) / width
+            y = y_min + i * (y_max - y_min) / height
+            z = complex(x, y)
+            count = 0
+            while (z.real * z.real + z.imag * z.imag < 4.0) and (count < max_iterations):
+                z = z - (z ** 3 - 1) / (3 * z ** 2)
+                count += 1
+            section_counts[i, j] = count
+    return section_counts
+
 # --------------------------------------------------------------------------
 # MANDELBROT CALCULATOR CLASS
 # --------------------------------------------------------------------------
 class MandelbrotCalculator:
     """
-    Class for calculating Mandelbrot set sections with color mapping.
+    Class for calculating Mandelbrot, Julia, and Fatou set sections with color mapping.
     """
-    
-    def calculate_section(self, section_index, section_width, width, height,
-                          x_min, x_max, y_min, y_max, max_iterations, theme):
+
+    def calculate_mandelbrot_section(self, section_index, section_width, width, height,
+                                     x_min, x_max, y_min, y_max, max_iterations, theme):
         """
         Calculate and color a section of the Mandelbrot set.
-        
-        Args:
-            section_index (int): Index of the section to calculate
-            section_width (int): Width of the section in pixels
-            width (int): Total width of the image in pixels
-            height (int): Total height of the image in pixels
-            x_min (float): Minimum x-coordinate in the complex plane
-            x_max (float): Maximum x-coordinate in the complex plane
-            y_min (float): Minimum y-coordinate in the complex plane
-            y_max (float): Maximum y-coordinate in the complex plane
-            max_iterations (int): Maximum number of iterations to perform
-            theme (str): Color theme to apply
-            
-        Returns:
-            numpy.ndarray: RGB color array for the section
         """
         iterations = mandelbrot_section_jit(section_index, section_width, width, height,
                                             x_min, x_max, y_min, y_max, max_iterations)
+        colors = apply_color_theme(iterations, max_iterations, theme)
+        return colors
+
+    def calculate_julia_section(self, section_index, section_width, width, height,
+                                 x_min, x_max, y_min, y_max, max_iterations, theme, c):
+        """
+        Calculate and color a section of the Julia set.
+        """
+        iterations = julia_section_jit(section_index, section_width, width, height,
+                                       x_min, x_max, y_min, y_max, max_iterations, c)
+        colors = apply_color_theme(iterations, max_iterations, theme)
+        return colors
+
+    def calculate_fatou_section(self, section_index, section_width, width, height,
+                                 x_min, x_max, y_min, y_max, max_iterations, theme):
+        """
+        Calculate and color a section of the Fatou set.
+        """
+        iterations = fatou_section_jit(section_index, section_width, width, height,
+                                       x_min, x_max, y_min, y_max, max_iterations)
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 
@@ -283,7 +357,14 @@ class MandelbrotViewer:
         self.status_bar = ttk.Label(master, text="", relief=tk.SUNKEN, anchor="w", font=("Consolas", 10))
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-        
+        # Add fractal type dropdown
+        self.fractal_type_label = ttk.Label(self.control_frame, text="Fractal Type:")
+        self.fractal_type_label.grid(row=0, column=4, padx=5, pady=5)
+        self.fractal_types = ["Mandelbrot", "Julia", "Fatou"]
+        self.fractal_type_var = tk.StringVar(value="Mandelbrot")
+        self.fractal_type_menu = ttk.OptionMenu(self.control_frame, self.fractal_type_var, "Mandelbrot",
+                                                *self.fractal_types, command=self.fractal_type_changed)
+        self.fractal_type_menu.grid(row=0, column=5, padx=5, pady=5)
         
         self.canvas.bind("<Button-1>", lambda event: self.fluid_zoom(event, 0.125))
         self.canvas.bind("<Button-2>", self.advance_theme)
@@ -317,7 +398,7 @@ class MandelbrotViewer:
         if multiprocessing.get_start_method(allow_none=True) != "spawn":
             multiprocessing.set_start_method("spawn", force=True)
         self.pool = multiprocessing.Pool(processes=self.num_cores)
-        self.calculator = MandelbrotCalculator()
+        self.calculator = MandelbrotCalculator()  # Reintroduce the calculator
         self.resize_job = None
         self.draw_mandelbrot()
 
@@ -381,7 +462,7 @@ class MandelbrotViewer:
     
     def draw_mandelbrot(self):
         """
-        Calculate and draw the Mandelbrot set using multiprocessing.
+        Calculate and draw the fractal set using multiprocessing.
         
         Updates the display with the current view parameters and color theme.
         """
@@ -390,40 +471,71 @@ class MandelbrotViewer:
 
         if self.auto_adjust:
             self.auto_iterations = int(100 * (self.zoom_level ** 0.11))
-            self.offset_scale.config(from_= (2+self.auto_iterations * -1))
-            self.offset_scale.config(to=      int(200 * (10 ** 1.2) + 100 * math.log(self.zoom_level / 10)))
+            self.offset_scale.config(from_=(2 + self.auto_iterations * -1))
+            self.offset_scale.config(to=int(200 * (10 ** 1.2) + 100 * math.log(self.zoom_level / 10)))
 
         self.max_iterations = self.auto_iterations + self.iteration_offset
-        
+
         start_time = time.time()
         num_sections = 2 ** int(np.floor(np.log2(self.num_cores)))
         section_width = self.width // num_sections
-        
-        if self.color_theme == "CPU Cores":
-            tasks = [
-                (i, section_width, self.width, self.height,
-                self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes))
-                for i in range(num_sections)
-            ]
-        else:
-            tasks = [
-                (i, section_width, self.width, self.height,
-                self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, self.color_theme)
-                for i in range(num_sections)
-            ]
-        
-        section_arrays = self.pool.starmap(self.calculator.calculate_section, tasks)
+
+        fractal_type = self.fractal_type_var.get()
+        tasks = []
+        if (fractal_type == "Mandelbrot"):
+            if self.color_theme == "CPU Cores":
+                tasks = [
+                    (i, section_width, self.width, self.height,
+                    self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes))
+                    for i in range(num_sections)
+                ]
+            else:
+                tasks = [
+                    (i, section_width, self.width, self.height,
+                    self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, self.color_theme)
+                    for i in range(num_sections)
+                ]
+            section_arrays = self.pool.starmap(self.calculator.calculate_mandelbrot_section, tasks)
+        elif fractal_type == "Julia":
+            if self.color_theme == "CPU Cores":
+                tasks = [
+                    (i, section_width, self.width, self.height,
+                    self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes), self.julia_c)
+                    for i in range(num_sections)
+                ]
+            else:
+                tasks = [
+                    (i, section_width, self.width, self.height,
+                    self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, self.color_theme, self.julia_c)
+                    for i in range(num_sections)
+                ]
+            section_arrays = self.pool.starmap(self.calculator.calculate_julia_section, tasks)
+        elif fractal_type == "Fatou":
+            if self.color_theme == "CPU Cores":
+                tasks = [
+                    (i, section_width, self.width, self.height,
+                    self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, random.choice(self.themes))
+                    for i in range(num_sections)
+                ]
+            else:
+                tasks = [
+                    (i, section_width, self.width, self.height,
+                    self.x_min, self.x_max, self.y_min, self.y_max, self.max_iterations, self.color_theme)
+                    for i in range(num_sections)
+                ]
+            section_arrays = self.pool.starmap(self.calculator.calculate_fatou_section, tasks)
+
         full_array = np.hstack(section_arrays)
         image = Image.fromarray(full_array, mode="RGB")
         self.photo = ImageTk.PhotoImage(image)
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
         elapsed = time.time() - start_time
-        
+
         title_str = (f"{self.app_name} | {elapsed:.2f}s | {self.zoom_level:.2f}x | Iter: {self.max_iterations} "
                      f"(Base: {self.auto_iterations} + Off: {self.iteration_offset}) "
                      f"| Theme: {self.color_theme}")
         self.master.title(title_str)
-        
+
         coord_str = (f"X_min: {self.x_min:.16g}, X_max: {self.x_max:.16g} | "
                      f"Y_min: {self.y_min:.16g}, Y_max: {self.y_max:.16g}")
         self.status_bar.config(text=f"Cores: {num_sections} | " + coord_str)
@@ -440,12 +552,14 @@ class MandelbrotViewer:
             "iteration_offset": self.iteration_offset,
             "color_theme": self.color_theme,
             "auto_adjust": self.auto_adjust,
+            "fractal_type": self.fractal_type_var.get(),  # Save the current fractal type
             "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
             "zoom_level": self.base_range / (self.x_max - self.x_min),
             "max_iterations": self.max_iterations,
             "auto_iterations": self.auto_iterations
         }
         file_path = "bookmarks.json"
+        bookmarks = []
         if os.path.exists(file_path):
             try:
                 with open(file_path, "r") as f:
@@ -473,24 +587,40 @@ class MandelbrotViewer:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load bookmarks: {e}")
             return
-        
+
         lb_window = tk.Toplevel(self.master)
         lb_window.title("Load Bookmark")
         lb_window.geometry("1024x768")
-        
-        scrollbar = tk.Scrollbar(lb_window)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        lb = tk.Listbox(lb_window, yscrollcommand=scrollbar.set, font=("Consolas", 10))
+
+        # Vertical scrollbar
+        v_scrollbar = tk.Scrollbar(lb_window, orient=tk.VERTICAL)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Horizontal scrollbar
+        h_scrollbar = tk.Scrollbar(lb_window, orient=tk.HORIZONTAL)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Listbox with both scrollbars
+        lb = tk.Listbox(lb_window, yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set, font=("Consolas", 10))
         for index, bm in enumerate(bookmarks):
-            summary = (f"{index+1}: {bm['timestamp']} | Zoom: {bm['zoom_level']:.2f}x | "
-                       f"Iter_Offset: {bm['iteration_offset']} | "
-                       f"X: {bm['x_min']:.16g} to {bm['x_max']:.16g}, Y: {bm['y_min']:.16g} to {bm['y_max']:.16g} | "
-                       f"Theme: {bm['color_theme']} | Auto Adj {bm['auto_adjust']} | Auto Iter: {bm['auto_iterations']}")
+            summary = (
+                f"{index+1}: {bm['timestamp']} | "
+                f"Fractal: {bm.get('fractal_type', 'Mandelbrot')} | "
+                f"Theme: {bm['color_theme']} | "
+                f"Zoom: {bm['zoom_level']:.2f}x | "
+                f"Auto Adj: {bm['auto_adjust']} | "
+                f"Iter_Offset: {bm['iteration_offset']} | "
+                f"Auto Iter: {bm['auto_iterations']} | "
+                f"X: {bm['x_min']:.16g} to {bm['x_max']:.16g} | "
+                f"Y: {bm['y_min']:.16g} to {bm['y_max']:.16g}"
+            )
             lb.insert(tk.END, summary)
         lb.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=lb.yview)
-        
+
+        # Configure scrollbars
+        v_scrollbar.config(command=lb.yview)
+        h_scrollbar.config(command=lb.xview)
+
         def load_selected():
             """Load the selected bookmark."""
             selection = lb.curselection()
@@ -508,15 +638,12 @@ class MandelbrotViewer:
             self.offset_scale.set(self.iteration_offset)
             self.color_theme = bm["color_theme"]
             self.color_theme_var.set(self.color_theme)
-            self.auto_adjust = bm.get("auto_adjust")
-            if self.auto_adjust == False:
-                self.auto_iterations = bm.get("auto_iterations", self.auto_iterations)
-                self.offset_scale.config(from_= (2+self.auto_iterations * -1))
-                self.offset_scale.config(to= 16384)
+            self.auto_adjust = bm.get("auto_adjust", True)
             self.auto_adjust_var.set(self.auto_adjust)  # Update the checkbox state
+            self.fractal_type_var.set(bm.get("fractal_type", "Mandelbrot"))  # Load the fractal type
             self.draw_mandelbrot()
             lb_window.destroy()
-        
+
         def delete_selected():
             """Delete the selected bookmark."""
             selection = lb.curselection()
@@ -531,7 +658,7 @@ class MandelbrotViewer:
                 lb.delete(index)
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete bookmark: {e}")
-        
+
         lb.bind("<Double-Button-1>", lambda event: load_selected())
 
         button_frame = ttk.Frame(lb_window)
@@ -545,8 +672,9 @@ class MandelbrotViewer:
     
     def reset_view(self):
         """
-        Reset the view to the default parameters.
+        Reset the view to the default parameters and switch to Mandelbrot.
         """
+        self.fractal_type_var.set("Mandelbrot")  # Reset fractal type to Mandelbrot
         self.x_min = -2.0
         self.x_max = 1.0
         self.y_min = -1.5
@@ -732,6 +860,25 @@ class MandelbrotViewer:
         self.color_theme = next_theme
         self.draw_mandelbrot()  # Redraw with the new theme
     
+    def fractal_type_changed(self, value):
+        """
+        Update the fractal type and reset view parameters.
+        
+        Args:
+            value (str): Selected fractal type
+        """
+        if value == "Mandelbrot":
+            self.x_min, self.x_max = -2.0, 1.0
+            self.y_min, self.y_max = -1.5, 1.5
+        elif value == "Julia":
+            self.x_min, self.x_max = -1.5, 1.5
+            self.y_min, self.y_max = -1.5, 1.5
+            self.julia_c = complex(-0.7, 0.27015)  # Example Julia constant
+        elif value == "Fatou":
+            self.x_min, self.x_max = -2.0, 2.0
+            self.y_min, self.y_max = -2.0, 2.0
+        self.draw_mandelbrot()
+
     def __del__(self):
         """
         Clean up resources when the object is deleted.
