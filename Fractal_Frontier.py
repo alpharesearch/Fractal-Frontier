@@ -366,25 +366,52 @@ class MandelbrotViewer:
         self.fractal_type_menu = ttk.OptionMenu(self.control_frame, self.fractal_type_var, "Mandelbrot",
                                                 *self.fractal_types, command=self.fractal_type_changed)
         self.fractal_type_menu.grid(row=0, column=5, padx=5, pady=5)
-        
-        # Add input fields for julia_c in the control frame
-        self.julia_c_label = ttk.Label(self.control_frame, text="Julia C:")
-        self.julia_c_label.grid(row=2, column=0, padx=5, pady=5)
 
+        # Add sliders for julia_c in the control frame
+        self.julia_c_real_label = ttk.Label(self.control_frame, text="Julia C Real:")
+        self.julia_c_real_label.grid(row=3, column=0, columnspan=3, padx=5, pady=5, sticky="ew")  # Label on top
         self.julia_c_real_var = tk.DoubleVar(value=-0.7)  # Default real part
         self.julia_c_real_entry = ttk.Entry(self.control_frame, textvariable=self.julia_c_real_var, width=10)
-        self.julia_c_real_entry.grid(row=2, column=1, padx=5, pady=5)
+        self.julia_c_real_entry.grid(row=3, column=1, padx=5, pady=5)
         self.julia_c_real_entry.bind("<Return>", self.update_julia_c)
 
+        self.julia_c_real_slider = tk.Scale(
+            self.control_frame,
+            from_=-2.0,
+            to=2.0,
+            resolution=0.0001,  # Higher resolution for finer adjustments
+            orient=tk.HORIZONTAL,
+            variable=self.julia_c_real_var,
+            command=lambda value: self.update_julia_c_slider()
+        )
+        self.julia_c_real_slider.grid(row=4, column=0, columnspan=6, padx=5, pady=5, sticky="ew")  # Expand slider
+
+        self.julia_c_imag_label = ttk.Label(self.control_frame, text="Julia C Imag:")
+        self.julia_c_imag_label.grid(row=5, column=0, columnspan=3, padx=5, pady=5, sticky="ew")  # Label on top
         self.julia_c_imag_var = tk.DoubleVar(value=0.27015)  # Default imaginary part
         self.julia_c_imag_entry = ttk.Entry(self.control_frame, textvariable=self.julia_c_imag_var, width=10)
-        self.julia_c_imag_entry.grid(row=2, column=2, padx=5, pady=5)
+        self.julia_c_imag_entry.grid(row=5, column=1, padx=5, pady=5)
         self.julia_c_imag_entry.bind("<Return>", self.update_julia_c)
 
+        self.julia_c_imag_slider = tk.Scale(
+            self.control_frame,
+            from_=-2.0,
+            to=2.0,
+            resolution=0.0001,  # Higher resolution for finer adjustments
+            orient=tk.HORIZONTAL,
+            variable=self.julia_c_imag_var,
+            command=lambda value: self.update_julia_c_slider()
+        )
+        self.julia_c_imag_slider.grid(row=6, column=0, columnspan=6, padx=5, pady=5, sticky="ew")  # Expand slider
+        
         # Hide Julia C input fields initially
-        self.julia_c_label.grid_remove()
         self.julia_c_real_entry.grid_remove()
         self.julia_c_imag_entry.grid_remove()
+        # Hide Julia C sliders initially
+        self.julia_c_real_label.grid_remove()
+        self.julia_c_real_slider.grid_remove()
+        self.julia_c_imag_label.grid_remove()
+        self.julia_c_imag_slider.grid_remove()
 
         self.canvas.bind("<Button-1>", lambda event: self.fluid_zoom(event, 0.125))
         self.canvas.bind("<Button-2>", self.advance_theme)
@@ -674,13 +701,19 @@ class MandelbrotViewer:
                 self.julia_c = complex(julia_c_data["real"], julia_c_data["imag"])  # Reconstruct the complex number
                 self.julia_c_real_var.set(self.julia_c.real)  # Update the real part input field
                 self.julia_c_imag_var.set(self.julia_c.imag)  # Update the imaginary part input field
-                self.julia_c_label.grid()
                 self.julia_c_real_entry.grid()
                 self.julia_c_imag_entry.grid()
+                self.julia_c_real_label.grid()
+                self.julia_c_real_slider.grid()
+                self.julia_c_imag_label.grid()
+                self.julia_c_imag_slider.grid()
             else:
-                self.julia_c_label.grid_remove()
                 self.julia_c_real_entry.grid_remove()
                 self.julia_c_imag_entry.grid_remove()
+                self.julia_c_real_label.grid_remove()
+                self.julia_c_real_slider.grid_remove()
+                self.julia_c_imag_label.grid_remove()
+                self.julia_c_imag_slider.grid_remove()
             self.draw_mandelbrot()
             lb_window.destroy()
 
@@ -910,24 +943,33 @@ class MandelbrotViewer:
             self.x_min, self.x_max = -2.0, 1.0
             self.y_min, self.y_max = -1.5, 1.5
             # Hide Julia C input fields
-            self.julia_c_label.grid_remove()
             self.julia_c_real_entry.grid_remove()
             self.julia_c_imag_entry.grid_remove()
+            self.julia_c_real_label.grid_remove()
+            self.julia_c_real_slider.grid_remove()
+            self.julia_c_imag_label.grid_remove()
+            self.julia_c_imag_slider.grid_remove()
         elif value == "Julia":
             self.x_min, self.x_max = -1.5, 1.5
             self.y_min, self.y_max = -1.5, 1.5
             self.julia_c = complex(-0.7, 0.27015)  # Example Julia constant
             # Show Julia C input fields
-            self.julia_c_label.grid()
             self.julia_c_real_entry.grid()
             self.julia_c_imag_entry.grid()
+            self.julia_c_real_label.grid()
+            self.julia_c_real_slider.grid()
+            self.julia_c_imag_label.grid()
+            self.julia_c_imag_slider.grid()
         elif value == "Fatou":
             self.x_min, self.x_max = -2.0, 2.0
             self.y_min, self.y_max = -2.0, 2.0
             # Hide Julia C input fields
-            self.julia_c_label.grid_remove()
             self.julia_c_real_entry.grid_remove()
             self.julia_c_imag_entry.grid_remove()
+            self.julia_c_real_label.grid_remove()
+            self.julia_c_real_slider.grid_remove()
+            self.julia_c_imag_label.grid_remove()
+            self.julia_c_imag_slider.grid_remove()
         self.draw_mandelbrot()
 
     def update_julia_c(self, event=None):
@@ -936,6 +978,15 @@ class MandelbrotViewer:
         
         Args:
             event: Event object, optional
+        """
+        real_part = self.julia_c_real_var.get()
+        imag_part = self.julia_c_imag_var.get()
+        self.julia_c = complex(real_part, imag_part)
+        self.draw_mandelbrot()
+
+    def update_julia_c_slider(self):
+        """
+        Update the Julia set constant based on slider values.
         """
         real_part = self.julia_c_real_var.get()
         imag_part = self.julia_c_imag_var.get()
