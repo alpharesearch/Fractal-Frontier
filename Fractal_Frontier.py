@@ -384,7 +384,7 @@ class MandelbrotViewer:
             variable=self.julia_c_real_var,
             command=lambda value: self.update_julia_c_slider()
         )
-        self.julia_c_real_slider.grid(row=4, column=0, columnspan=6, padx=5, pady=5, sticky="ew")  # Expand slider
+        self.julia_c_real_slider.grid(row=4, column=0, columnspan=8, padx=1, pady=1, sticky="ew")  # Expand slider
 
         self.julia_c_imag_label = ttk.Label(self.control_frame, text="Julia C Imag:")
         self.julia_c_imag_label.grid(row=5, column=0, columnspan=3, padx=5, pady=5, sticky="ew")  # Label on top
@@ -402,8 +402,24 @@ class MandelbrotViewer:
             variable=self.julia_c_imag_var,
             command=lambda value: self.update_julia_c_slider()
         )
-        self.julia_c_imag_slider.grid(row=6, column=0, columnspan=6, padx=5, pady=5, sticky="ew")  # Expand slider
-        
+        self.julia_c_imag_slider.grid(row=6, column=0, columnspan=8, padx=1, pady=1, sticky="ew")  # Expand slider
+
+        # Add slider for "e exp i n" in the control frame
+        self.e_exp_i_n_label = ttk.Label(self.control_frame, text="0.7885 * e^(i * slider_value)")
+        self.e_exp_i_n_label.grid(row=7, column=0, columnspan=3, padx=5, pady=5, sticky="ew")  # Label on top
+
+        self.e_exp_i_n_var = tk.DoubleVar(value=0.0)  # Default value for the slider
+        self.e_exp_i_n_slider = tk.Scale(
+            self.control_frame,
+            from_=0.0,
+            to=2 * math.pi,  # Slider range from 0 to 2π
+            resolution=0.01,  # Higher resolution for finer adjustments
+            orient=tk.HORIZONTAL,
+            variable=self.e_exp_i_n_var,
+            command=lambda value: self.update_e_exp_i_n_slider()
+        )
+        self.e_exp_i_n_slider.grid(row=8, column=0, columnspan=8, padx=5, pady=5, sticky="ew")  # Expand slider
+
         # Hide Julia C input fields initially
         self.julia_c_real_entry.grid_remove()
         self.julia_c_imag_entry.grid_remove()
@@ -412,6 +428,9 @@ class MandelbrotViewer:
         self.julia_c_real_slider.grid_remove()
         self.julia_c_imag_label.grid_remove()
         self.julia_c_imag_slider.grid_remove()
+        # Hide the new slider initially
+        self.e_exp_i_n_label.grid_remove()
+        self.e_exp_i_n_slider.grid_remove()
 
         self.canvas.bind("<Button-1>", lambda event: self.fluid_zoom(event, 0.125))
         self.canvas.bind("<Button-2>", self.advance_theme)
@@ -942,34 +961,40 @@ class MandelbrotViewer:
         if value == "Mandelbrot":
             self.x_min, self.x_max = -2.0, 1.0
             self.y_min, self.y_max = -1.5, 1.5
-            # Hide Julia C input fields
+            # Hide Julia C input fields and the new slider
             self.julia_c_real_entry.grid_remove()
             self.julia_c_imag_entry.grid_remove()
             self.julia_c_real_label.grid_remove()
             self.julia_c_real_slider.grid_remove()
             self.julia_c_imag_label.grid_remove()
             self.julia_c_imag_slider.grid_remove()
+            self.e_exp_i_n_label.grid_remove()
+            self.e_exp_i_n_slider.grid_remove()
         elif value == "Julia":
             self.x_min, self.x_max = -1.5, 1.5
             self.y_min, self.y_max = -1.5, 1.5
             self.julia_c = complex(-0.7, 0.27015)  # Example Julia constant
-            # Show Julia C input fields
+            # Show Julia C input fields and the new slider
             self.julia_c_real_entry.grid()
             self.julia_c_imag_entry.grid()
             self.julia_c_real_label.grid()
             self.julia_c_real_slider.grid()
             self.julia_c_imag_label.grid()
             self.julia_c_imag_slider.grid()
+            self.e_exp_i_n_label.grid()
+            self.e_exp_i_n_slider.grid()
         elif value == "Fatou":
             self.x_min, self.x_max = -2.0, 2.0
             self.y_min, self.y_max = -2.0, 2.0
-            # Hide Julia C input fields
+            # Hide Julia C input fields and the new slider
             self.julia_c_real_entry.grid_remove()
             self.julia_c_imag_entry.grid_remove()
             self.julia_c_real_label.grid_remove()
             self.julia_c_real_slider.grid_remove()
             self.julia_c_imag_label.grid_remove()
             self.julia_c_imag_slider.grid_remove()
+            self.e_exp_i_n_label.grid_remove()
+            self.e_exp_i_n_slider.grid_remove()
         self.draw_mandelbrot()
 
     def update_julia_c(self, event=None):
@@ -991,6 +1016,16 @@ class MandelbrotViewer:
         real_part = self.julia_c_real_var.get()
         imag_part = self.julia_c_imag_var.get()
         self.julia_c = complex(real_part, imag_part)
+        self.draw_mandelbrot()
+
+    def update_e_exp_i_n_slider(self):
+        """
+        Update the Julia set constant (c) based on the "e exp i n" slider value.
+        """
+        slider_value = self.e_exp_i_n_var.get()
+        self.julia_c = 0.7885 * complex(math.cos(slider_value), math.sin(slider_value))  # 0.7885 * e^(i * slider_value)
+        self.julia_c_real_var.set(self.julia_c.real)  # Update the real part input field
+        self.julia_c_imag_var.set(self.julia_c.imag)  # Update the imaginary part input field
         self.draw_mandelbrot()
 
     def __del__(self):
