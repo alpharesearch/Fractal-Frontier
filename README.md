@@ -5,9 +5,11 @@ Fractal Frontier is a graphical application that allows users to explore the Man
 
 ## Features
 - Interactive zooming and panning of the Mandelbrot set.
-- Multiple color themes for visualizing the fractal.
-- Bookmark functionality to save and load specific views.
-- Efficient calculations using multiprocessing and JIT compilation.
+- Multiple fractal types: Mandelbrot, Julia, and Fatou sets.
+- Multiple color themes for visualizing the fractal, including high-resolution themes with clipping to avoid overflow.
+- CPU Cores theme that randomly selects a color theme for each section.
+- Bookmark functionality to save and load specific views with associated parameters.
+- Efficient calculations using multiprocessing and JIT compilation with support for different fractal types.
 
 ## Project Structure
 ```
@@ -16,7 +18,9 @@ Fractal Frontier
 ├── requirements.txt              # Lists the dependencies required for the project.
 ├── README.md                     # Documentation for the project.
 ├── LICENSE                       # MIT License
-└── .gitignore                    # Specifies files and directories to ignore in version control.
+├── .gitignore                    # Specifies files and directories to ignore in version control.
+└── tests/                        # Test suite directory
+    └── test_calculator.py        # Unit tests for the calculator and theme system
 ```
 
 ## Installation
@@ -28,13 +32,43 @@ Fractal Frontier
 
 2. Install the required dependencies:
    ```
-   pip install -r requirements.txt
+   make install
    ```
 
 ## Usage
 To run the application, execute the following command:
 ```
-python Fractal_Frontier.py
+make run
+```
+
+To run the test suite, execute:
+```
+make test
+```
+
+To run a specific test file, execute:
+```
+pytest tests/test_calculator.py
+```
+
+To lint the code, execute:
+```
+make lint
+```
+
+To format the code, execute:
+```
+make format
+```
+
+To clean build artifacts, execute:
+```
+make clean
+```
+
+To see all available targets, execute:
+```
+make help
 ```
 
 ## Contributing

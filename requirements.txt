@@ -1,3 +1,9 @@
 Pillow
 numpy
 numba
+# dev tools
+flake8==7.1.0
+pytest==8.2.0
+black==24.4.2
+isort==5.13.2
+autopep8==1.6.0
