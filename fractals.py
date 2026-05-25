@@ -3,6 +3,13 @@ from numba import njit, prange
 
 from themes import apply_color_theme
 
+# Try to import GPU calculator
+try:
+    from gpu_fractals import GPUCalculator
+    GPU_AVAILABLE = True
+except ImportError:
+    GPU_AVAILABLE = False
+
 
 # --------------------------------------------------------------------------
 # JIT-COMPILED MANDELBROT ITERATION CALCULATOR
@@ -103,9 +110,7 @@ def julia_section_jit(
 ):
     """
     Calculate Julia set iterations for a section of the image using
-    Numba JIT compilation with optimizations:
-    - Fast math optimizations
-    - Unrolled complex arithmetic (avoids complex object allocations)
+    Numba JIT compilation with optimizations.
 
     Args:
         section_index (int): Index of the section to calculate
@@ -171,9 +176,7 @@ def fatou_section_jit(
 ):
     """
     Calculate Fatou set iterations for a section of the image using
-    Numba JIT compilation with optimizations:
-    - Fast math optimizations
-    - Unrolled complex arithmetic (avoids complex object allocations)
+    Numba JIT compilation with optimizations.
 
     Args:
         section_index (int): Index of the section to calculate
@@ -205,31 +208,24 @@ def fatou_section_jit(
             y = y_min + i * y_range * height_inv
             
             # Fatou set: Newton's method for z^3 - 1 = 0
-            # z = z - (z^3 - 1) / (3z^2)
             zr = x
             zi = y
             count = 0
             
             while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
-                # z^2
                 sr = zr * zr - zi * zi
                 si = 2.0 * zr * zi
-                # 3*z^2
                 tr = 3.0 * sr
                 ti = 3.0 * si
-                # z^3 = z * z^2
                 zr3 = zr * sr - zi * si
                 zi3 = zr * si + zi * sr
-                # numerator: z^3 - 1
                 nr = zr3 - 1.0
                 ni = zi3
-                # division: (nr + ni*i) / (tr + ti*i)
                 denom = tr * tr + ti * ti
                 if denom == 0.0:
                     break
                 div_r = (nr * tr + ni * ti) / denom
                 div_i = (ni * tr - nr * ti) / denom
-                # z = z - division
                 zr = zr - div_r
                 zi = zi - div_i
                 count += 1
@@ -239,12 +235,26 @@ def fatou_section_jit(
 
 
 # --------------------------------------------------------------------------
-# MANDELBROT CALCULATOR CLASS
+# GPU-AWARE MANDELBROT CALCULATOR CLASS
 # --------------------------------------------------------------------------
 class MandelbrotCalculator:
     """
-    Class for calculating Mandelbrot, Julia, and Fatou set sections with color mapping.
+    Class for calculating Mandelbrot, Julia, and Fatou sets with color mapping.
+    
+    Supports both CPU (multi-process) and GPU (CUDA) backends.
+    Use set_use_gpu(True) to enable GPU acceleration.
     """
+    
+    _use_gpu = GPU_AVAILABLE
+
+    @classmethod
+    def set_use_gpu(cls, enabled: bool):
+        """Enable or disable GPU acceleration."""
+        if enabled and not GPU_AVAILABLE:
+            print("WARNING: GPU not available, using CPU fallback")
+            cls._use_gpu = False
+        else:
+            cls._use_gpu = enabled
 
     def calculate_mandelbrot_section(
         self,
@@ -261,18 +271,46 @@ class MandelbrotCalculator:
     ):
         """
         Calculate and color a section of the Mandelbrot set.
+        Uses GPU if enabled, otherwise uses CPU parallel.
         """
-        iterations = mandelbrot_section_jit(
-            section_index,
-            section_width,
-            width,
-            height,
-            x_min,
-            x_max,
-            y_min,
-            y_max,
-            max_iterations,
-        )
+        if self._use_gpu:
+            gpu_calc = GPUCalculator()
+            iterations = gpu_calc.calculate_mandelbrot_gpu(
+                width, height, x_min, x_max, y_min, y_max, max_iterations
+            )
+            # Extract the section
+            start_x = section_index * section_width
+            end_x = min(start_x + section_width, width)
+            iterations = iterations[:, start_x:end_x]
+        else:
+            iterations = mandelbrot_section_jit(
+                section_index,
+                section_width,
+                width,
+                height,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                max_iterations,
+            )
+        colors = apply_color_theme(iterations, max_iterations, theme)
+        return colors
+
+    def calculate_mandelbrot_full(self, width, height, x_min, x_max, y_min, y_max, max_iterations, theme):
+        """
+        Calculate the full Mandelbrot image in one GPU/CPU call.
+        More efficient than section-based calculation for GPU.
+        """
+        if self._use_gpu:
+            gpu_calc = GPUCalculator()
+            iterations = gpu_calc.calculate_mandelbrot_gpu(
+                width, height, x_min, x_max, y_min, y_max, max_iterations
+            )
+        else:
+            iterations = mandelbrot_section_jit(
+                0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
+            )
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 

@@ -18,7 +18,7 @@ from tkinter import messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-from fractals import MandelbrotCalculator
+from fractals import MandelbrotCalculator, GPU_AVAILABLE
 from themes import apply_color_theme  # noqa: F401
 
 
@@ -55,6 +55,9 @@ class MandelbrotViewer:
         self.color_theme = "Default"
 
         self.auto_adjust = True
+        
+        # GPU mode - enabled by default if available
+        self.use_gpu = GPU_AVAILABLE
 
         self.canvas = tk.Canvas(
             master, width=self.width, height=self.height, bg="black"
@@ -125,6 +128,19 @@ class MandelbrotViewer:
             command=self.toggle_auto_adjust,
         )
         self.auto_adjust_checkbox.grid(row=1, column=0, padx=5, pady=5)
+        
+        # GPU toggle checkbox
+        if GPU_AVAILABLE:
+            self.gpu_var = tk.BooleanVar(value=self.use_gpu)
+            self.gpu_checkbox = ttk.Checkbutton(
+                self.control_frame,
+                text="GPU",
+                variable=self.gpu_var,
+                command=self.toggle_gpu,
+            )
+            self.gpu_checkbox.grid(row=1, column=4, padx=5, pady=5)
+        else:
+            self.gpu_var = None
 
         self.status_bar = ttk.Label(
             master, text="", relief=tk.SUNKEN, anchor="w", font=("Consolas", 10)
@@ -324,12 +340,21 @@ class MandelbrotViewer:
         self.height = self.canvas.winfo_height()
         self.draw_mandelbrot()
 
+    def toggle_gpu(self):
+        """Toggle GPU acceleration on/off."""
+        self.use_gpu = self.gpu_var.get()
+        MandelbrotCalculator.set_use_gpu(self.use_gpu)
+        self.draw_mandelbrot()
+
     def draw_mandelbrot(self):
         """
-        Calculate and draw the fractal set using multiprocessing.
+        Calculate and draw the fractal set using multiprocessing or GPU.
 
         Updates the display with the current view parameters and color theme.
         """
+        # Set GPU mode on calculator
+        MandelbrotCalculator.set_use_gpu(self.use_gpu)
+        
         current_range = self.x_max - self.x_min
         self.zoom_level = self.base_range / current_range
 
@@ -364,124 +389,80 @@ class MandelbrotViewer:
         section_width = self.width // num_sections
 
         fractal_type = self.fractal_type_var.get()
-        tasks = []
-        if fractal_type == "Mandelbrot":
-            if self.color_theme == self.CPU_CORES_THEME:
-                tasks = [
-                    (
-                        i,
-                        section_width,
-                        self.width,
-                        self.height,
-                        self.x_min,
-                        self.x_max,
-                        self.y_min,
-                        self.y_max,
-                        self.max_iterations,
-                        random.choice(self.themes),
-                    )
-                    for i in range(num_sections)
-                ]
-            else:
-                tasks = [
-                    (
-                        i,
-                        section_width,
-                        self.width,
-                        self.height,
-                        self.x_min,
-                        self.x_max,
-                        self.y_min,
-                        self.y_max,
-                        self.max_iterations,
-                        self.color_theme,
-                    )
-                    for i in range(num_sections)
-                ]
-            section_arrays = self.pool.starmap(
-                self.calculator.calculate_mandelbrot_section, tasks
-            )
-        elif fractal_type == "Julia":
-            if self.color_theme == self.CPU_CORES_THEME:
-                tasks = [
-                    (
-                        i,
-                        section_width,
-                        self.width,
-                        self.height,
-                        self.x_min,
-                        self.x_max,
-                        self.y_min,
-                        self.y_max,
-                        self.max_iterations,
-                        random.choice(self.themes),
-                        self.julia_c,
-                    )
-                    for i in range(num_sections)
-                ]
-            else:
-                tasks = [
-                    (
-                        i,
-                        section_width,
-                        self.width,
-                        self.height,
-                        self.x_min,
-                        self.x_max,
-                        self.y_min,
-                        self.y_max,
-                        self.max_iterations,
-                        self.color_theme,
-                        self.julia_c,
-                    )
-                    for i in range(num_sections)
-                ]
-            section_arrays = self.pool.starmap(
-                self.calculator.calculate_julia_section, tasks
-            )
-        elif fractal_type == "Fatou":
-            if self.color_theme == self.CPU_CORES_THEME:
-                tasks = [
-                    (
-                        i,
-                        section_width,
-                        self.width,
-                        self.height,
-                        self.x_min,
-                        self.x_max,
-                        self.y_min,
-                        self.y_max,
-                        self.max_iterations,
-                        random.choice(self.themes),
-                    )
-                    for i in range(num_sections)
-                ]
-            else:
-                tasks = [
-                    (
-                        i,
-                        section_width,
-                        self.width,
-                        self.height,
-                        self.x_min,
-                        self.x_max,
-                        self.y_min,
-                        self.y_max,
-                        self.max_iterations,
-                        self.color_theme,
-                    )
-                    for i in range(num_sections)
-                ]
-            section_arrays = self.pool.starmap(
-                self.calculator.calculate_fatou_section, tasks
-            )
 
-        full_array = np.hstack(section_arrays)
+        # GPU mode: calculate full image in one call (no multiprocessing needed)
+        if self.use_gpu and fractal_type == "Mandelbrot":
+            full_array = self.calculator.calculate_mandelbrot_full(
+                self.width, self.height,
+                self.x_min, self.x_max, self.y_min, self.y_max,
+                self.max_iterations, self.color_theme
+            )
+        else:
+            # CPU mode: use multiprocessing with sections
+            tasks = []
+            if fractal_type == "Mandelbrot":
+                if self.color_theme == self.CPU_CORES_THEME:
+                    tasks = [
+                        (i, section_width, self.width, self.height,
+                         self.x_min, self.x_max, self.y_min, self.y_max,
+                         self.max_iterations, random.choice(self.themes))
+                        for i in range(num_sections)
+                    ]
+                else:
+                    tasks = [
+                        (i, section_width, self.width, self.height,
+                         self.x_min, self.x_max, self.y_min, self.y_max,
+                         self.max_iterations, self.color_theme)
+                        for i in range(num_sections)
+                    ]
+                section_arrays = self.pool.starmap(
+                    self.calculator.calculate_mandelbrot_section, tasks
+                )
+            elif fractal_type == "Julia":
+                if self.color_theme == self.CPU_CORES_THEME:
+                    tasks = [
+                        (i, section_width, self.width, self.height,
+                         self.x_min, self.x_max, self.y_min, self.y_max,
+                         self.max_iterations, random.choice(self.themes),
+                         self.julia_c)
+                        for i in range(num_sections)
+                    ]
+                else:
+                    tasks = [
+                        (i, section_width, self.width, self.height,
+                         self.x_min, self.x_max, self.y_min, self.y_max,
+                         self.max_iterations, self.color_theme, self.julia_c)
+                        for i in range(num_sections)
+                    ]
+                section_arrays = self.pool.starmap(
+                    self.calculator.calculate_julia_section, tasks
+                )
+            elif fractal_type == "Fatou":
+                if self.color_theme == self.CPU_CORES_THEME:
+                    tasks = [
+                        (i, section_width, self.width, self.height,
+                         self.x_min, self.x_max, self.y_min, self.y_max,
+                         self.max_iterations, random.choice(self.themes))
+                        for i in range(num_sections)
+                    ]
+                else:
+                    tasks = [
+                        (i, section_width, self.width, self.height,
+                         self.x_min, self.x_max, self.y_min, self.y_max,
+                         self.max_iterations, self.color_theme)
+                        for i in range(num_sections)
+                    ]
+                section_arrays = self.pool.starmap(
+                    self.calculator.calculate_fatou_section, tasks
+                )
+
+            full_array = np.hstack(section_arrays)
         image = Image.fromarray(full_array, mode="RGB")
         self.photo = ImageTk.PhotoImage(image)
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
         elapsed = time.time() - start_time
 
+        backend = "GPU" if self.use_gpu else f"Cores: {num_sections}"
         title_str = (
             f"{self.app_name} | {elapsed:.2f}s | "
             + f"{self.zoom_level:.2f}x | Iter: {self.max_iterations} "
@@ -494,7 +475,7 @@ class MandelbrotViewer:
             f"X_min: {self.x_min:.16g}, X_max: {self.x_max:.16g} | "
             f"Y_min: {self.y_min:.16g}, Y_max: {self.y_max:.16g}"
         )
-        self.status_bar.config(text=f"Cores: {num_sections} | " + coord_str)
+        self.status_bar.config(text=f"{backend} | " + coord_str)
 
     def save_bookmark(self):
         """
