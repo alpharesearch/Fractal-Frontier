@@ -344,9 +344,16 @@ class MandelbrotViewer:
         self.draw_mandelbrot()
 
     def toggle_gpu(self):
-        """Toggle GPU acceleration on/off."""
+        """Toggle GPU acceleration on/off, ensuring CPU is used when GPU is off and vice versa."""
         self.use_gpu = self.gpu_var.get()
-        MandelbrotCalculator.set_use_gpu(self.use_gpu)
+        if self.use_gpu:
+            # GPU enabled — ensure calculator uses GPU
+            MandelbrotCalculator.set_use_gpu(True)
+            self.status_bar.config(text="Switched to GPU backend")
+        else:
+            # GPU disabled — explicitly force CPU mode on the calculator
+            MandelbrotCalculator.set_use_gpu(False)
+            self.status_bar.config(text=f"Switched to CPU backend ({self.num_cores} cores)")
         self.draw_mandelbrot()
 
     def draw_mandelbrot(self):

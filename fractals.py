@@ -270,30 +270,20 @@ class MandelbrotCalculator:
         theme,
     ):
         """
-        Calculate and color a section of the Mandelbrot set.
-        Uses GPU if enabled, otherwise uses CPU parallel.
+        Calculate and color a section of the Mandelbrot set (CPU-only).
+        Called from the multiprocessing pool path; GPU is handled by calculate_full().
         """
-        if self._use_gpu:
-            gpu_calc = GPUCalculator()
-            iterations = gpu_calc.calculate_mandelbrot_gpu(
-                width, height, x_min, x_max, y_min, y_max, max_iterations
-            )
-            # Extract the section
-            start_x = section_index * section_width
-            end_x = min(start_x + section_width, width)
-            iterations = iterations[:, start_x:end_x]
-        else:
-            iterations = mandelbrot_section_jit(
-                section_index,
-                section_width,
-                width,
-                height,
-                x_min,
-                x_max,
-                y_min,
-                y_max,
-                max_iterations,
-            )
+        iterations = mandelbrot_section_jit(
+            section_index,
+            section_width,
+            width,
+            height,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            max_iterations,
+        )
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 
