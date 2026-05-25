@@ -297,20 +297,44 @@ class MandelbrotCalculator:
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 
-    def calculate_mandelbrot_full(self, width, height, x_min, x_max, y_min, y_max, max_iterations, theme):
+    def calculate_full(self, fractal_type, width, height, x_min, x_max, y_min, y_max, max_iterations, theme, c=None):
         """
-        Calculate the full Mandelbrot image in one GPU/CPU call.
+        Calculate the full fractal image in one GPU/CPU call.
         More efficient than section-based calculation for GPU.
+        
+        Args:
+            fractal_type: 'mandelbrot', 'julia', or 'fatou'
+            c: Julia constant (complex), used only for julia type
         """
         if self._use_gpu:
             gpu_calc = GPUCalculator()
-            iterations = gpu_calc.calculate_mandelbrot_gpu(
-                width, height, x_min, x_max, y_min, y_max, max_iterations
-            )
+            if fractal_type == 'mandelbrot':
+                iterations = gpu_calc.calculate_mandelbrot_gpu(
+                    width, height, x_min, x_max, y_min, y_max, max_iterations
+                )
+            elif fractal_type == 'julia':
+                c = c or complex(-0.7, 0.27015)
+                iterations = gpu_calc.calculate_julia_gpu(
+                    width, height, x_min, x_max, y_min, y_max, max_iterations, c
+                )
+            elif fractal_type == 'fatou':
+                iterations = gpu_calc.calculate_fatou_gpu(
+                    width, height, x_min, x_max, y_min, y_max, max_iterations
+                )
         else:
-            iterations = mandelbrot_section_jit(
-                0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
-            )
+            if fractal_type == 'mandelbrot':
+                iterations = mandelbrot_section_jit(
+                    0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
+                )
+            elif fractal_type == 'julia':
+                c = c or complex(-0.7, 0.27015)
+                iterations = julia_section_jit(
+                    0, width, width, height, x_min, x_max, y_min, y_max, max_iterations, c
+                )
+            elif fractal_type == 'fatou':
+                iterations = fatou_section_jit(
+                    0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
+                )
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 

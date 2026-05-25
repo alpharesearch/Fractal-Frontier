@@ -391,11 +391,14 @@ class MandelbrotViewer:
         fractal_type = self.fractal_type_var.get()
 
         # GPU mode: calculate full image in one call (no multiprocessing needed)
-        if self.use_gpu and fractal_type == "Mandelbrot":
-            full_array = self.calculator.calculate_mandelbrot_full(
+        if self.use_gpu and fractal_type in ("Mandelbrot", "Julia", "Fatou"):
+            julia_c = self.julia_c if fractal_type == "Julia" else None
+            full_array = self.calculator.calculate_full(
+                fractal_type.lower(),
                 self.width, self.height,
                 self.x_min, self.x_max, self.y_min, self.y_max,
-                self.max_iterations, self.color_theme
+                self.max_iterations, self.color_theme,
+                c=julia_c
             )
         else:
             # CPU mode: use multiprocessing with sections
