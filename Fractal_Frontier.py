@@ -53,6 +53,7 @@ class MandelbrotViewer:
         self.iteration_offset = 0
         self.auto_iterations = 50
         self.color_theme = "Default"
+        self.julia_c = complex(-0.7, 0.27015)
 
         self.auto_adjust = True
         
@@ -685,7 +686,7 @@ class MandelbrotViewer:
         try:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
-            if event.type == "2":
+            if event.type == 2:
                 center_x = (self.x_min + self.x_max) / 2
                 center_y = (self.y_min + self.y_max) / 2
             else:
@@ -726,7 +727,7 @@ class MandelbrotViewer:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
 
-            if event.type == "2":  # Keyboard event
+            if event.type == 2:  # Keyboard event
                 center_x = (self.x_min + self.x_max) / 2
                 center_y = (self.y_min + self.y_max) / 2
             else:  # Mouse event
