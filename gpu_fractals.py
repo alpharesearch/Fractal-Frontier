@@ -188,30 +188,16 @@ class GPUCalculator:
     def calculate_mandelbrot_gpu(self, width, height, x_min, x_max, y_min, y_max, max_iterations):
         """
         Calculate Mandelbrot set using GPU.
-        
-        Args:
-            width: Image width in pixels
-            height: Image height in pixels
-            x_min, x_max: X range in complex plane
-            y_min, y_max: Y range in complex plane
-            max_iterations: Maximum iterations
-            
-        Returns:
-            numpy.ndarray: 2D array of iteration counts (host memory)
         """
-        # Allocate device memory
-        d_result = cuda.to_device(np.zeros((height, width), dtype=np.int32))
-        
-        # Configure kernel launch parameters optimized for RTX 5090
-        # Use 2D blocks of 32x8 = 256 threads per block for better occupancy
+        h_result = np.zeros((height, width), dtype=np.int32)
+        d_result = cuda.to_device(h_result)
+
         threads_per_block = (32, 8)
         blocks_per_grid_x = (width + threads_per_block[0] - 1) // threads_per_block[0]
         blocks_per_grid_y = (height + threads_per_block[1] - 1) // threads_per_block[1]
-        # Multiply grid by SM count for better occupancy on large GPUs
         sm_count = max(1, self.device.MULTIPROCESSOR_COUNT)
         blocks_per_grid = (blocks_per_grid_x * sm_count, blocks_per_grid_y)
-        
-        # Launch kernel (extra threads will be filtered by bounds check)
+
         mandelbrot_kernel[blocks_per_grid, threads_per_block](
             d_result,
             np.float64(x_min),
@@ -222,35 +208,23 @@ class GPUCalculator:
             height,
             max_iterations,
         )
-        
-        # Copy result back to host
-        h_result = d_result.copy_to_host()
-        
+
+        d_result.copy_to_host(h_result)
         return h_result
     
     def calculate_julia_gpu(self, width, height, x_min, x_max, y_min, y_max, max_iterations, c):
         """
         Calculate Julia set using GPU.
-        
-        Args:
-            width: Image width in pixels
-            height: Image height in pixels
-            x_min, x_max: X range in complex plane
-            y_min, y_max: Y range in complex plane
-            max_iterations: Maximum iterations
-            c: Julia constant (complex)
-            
-        Returns:
-            numpy.ndarray: 2D array of iteration counts (host memory)
         """
-        d_result = cuda.to_device(np.zeros((height, width), dtype=np.int32))
-        
+        h_result = np.zeros((height, width), dtype=np.int32)
+        d_result = cuda.to_device(h_result)
+
         threads_per_block = (32, 8)
         blocks_per_grid_x = (width + threads_per_block[0] - 1) // threads_per_block[0]
         blocks_per_grid_y = (height + threads_per_block[1] - 1) // threads_per_block[1]
         sm_count = max(1, self.device.MULTIPROCESSOR_COUNT)
         blocks_per_grid = (blocks_per_grid_x * sm_count, blocks_per_grid_y)
-        
+
         julia_kernel[blocks_per_grid, threads_per_block](
             d_result,
             np.float64(x_min),
@@ -263,33 +237,23 @@ class GPUCalculator:
             c.real,
             c.imag,
         )
-        
-        h_result = d_result.copy_to_host()
-        
+
+        d_result.copy_to_host(h_result)
         return h_result
     
     def calculate_fatou_gpu(self, width, height, x_min, x_max, y_min, y_max, max_iterations):
         """
         Calculate Fatou set using GPU.
-        
-        Args:
-            width: Image width in pixels
-            height: Image height in pixels
-            x_min, x_max: X range in complex plane
-            y_min, y_max: Y range in complex plane
-            max_iterations: Maximum iterations
-            
-        Returns:
-            numpy.ndarray: 2D array of iteration counts (host memory)
         """
-        d_result = cuda.to_device(np.zeros((height, width), dtype=np.int32))
-        
+        h_result = np.zeros((height, width), dtype=np.int32)
+        d_result = cuda.to_device(h_result)
+
         threads_per_block = (32, 8)
         blocks_per_grid_x = (width + threads_per_block[0] - 1) // threads_per_block[0]
         blocks_per_grid_y = (height + threads_per_block[1] - 1) // threads_per_block[1]
         sm_count = max(1, self.device.MULTIPROCESSOR_COUNT)
         blocks_per_grid = (blocks_per_grid_x * sm_count, blocks_per_grid_y)
-        
+
         fatou_kernel[blocks_per_grid, threads_per_block](
             d_result,
             np.float64(x_min),
@@ -300,7 +264,6 @@ class GPUCalculator:
             height,
             max_iterations,
         )
-        
-        h_result = d_result.copy_to_host()
-        
+
+        d_result.copy_to_host(h_result)
         return h_result
