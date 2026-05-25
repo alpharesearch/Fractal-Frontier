@@ -50,6 +50,8 @@ class MandelbrotViewer:
         self.y_min = np.float64(-1.5)
         self.y_max = np.float64(1.5)
         self.base_range = self.x_max - self.x_min  # 3.0
+        self.zoom_level = 1.0
+        self.is_zooming = False
         self.iteration_offset = 0
         self.auto_iterations = 50
         self.color_theme = "Default"
@@ -462,6 +464,8 @@ class MandelbrotViewer:
 
             full_array = np.hstack(section_arrays)
         image = Image.fromarray(full_array, mode="RGB")
+        if hasattr(self, "photo"):
+            self.photo = None
         self.photo = ImageTk.PhotoImage(image)
         self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
         elapsed = time.time() - start_time
@@ -585,9 +589,9 @@ class MandelbrotViewer:
             self.y_min = bm["y_min"]
             self.y_max = bm["y_max"]
             self.iteration_offset = bm["iteration_offset"]
-            self.offset_scale.config(
-                to=self.iteration_offset
-            )  # Force slider maximum to the loaded value.
+            current_max = self.offset_scale.cget("to")
+            if int(current_max) < self.iteration_offset:
+                self.offset_scale.config(to=self.iteration_offset * 2)
             self.offset_scale.set(self.iteration_offset)
             self.color_theme = bm["color_theme"]
             self.color_theme_var.set(self.color_theme)
@@ -677,12 +681,11 @@ class MandelbrotViewer:
             zoom_factor (float): Factor to zoom by (>1 zooms out, <1 zooms in)
         """
         if self.zoom_level <= 0.26 and zoom_factor >= 2.0:
-            self.is_zooming = False
             return
-        if getattr(self, "is_zooming", False):  # Ignore if already zooming
+        if self.is_zooming:
             return
 
-        self.is_zooming = True  # Set zooming flag
+        self.is_zooming = True
         try:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
@@ -716,14 +719,12 @@ class MandelbrotViewer:
             Defaults to 0.09.
         """
         if self.zoom_level <= 0.26 and zoom_factor >= 2.0:
-            self.is_zooming = False
             return
-        if getattr(self, "is_zooming", False):  # Ignore if already zooming
+        if self.is_zooming:
             return
 
-        self.is_zooming = True  # Set zooming flag
+        self.is_zooming = True
         try:
-
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
 
