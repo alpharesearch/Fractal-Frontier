@@ -46,8 +46,9 @@ def mandelbrot_kernel(
         result[y, x] = max_iterations
         return
     
-    # Period-2 bulb check: (cx+1)^2 + cy^2 < 0.25
-    if (cx + 1.0) * (cx + 1.0) + cy * cy < 0.25:
+    # Period-2 bulb check: the period-2 component is the disk |c+1| < 1/4,
+    # i.e. (cx+1)^2 + cy^2 < 0.0625 (a radius of 0.5 was twice too big).
+    if (cx + 1.0) * (cx + 1.0) + cy * cy < 0.0625:
         result[y, x] = max_iterations
         return
     

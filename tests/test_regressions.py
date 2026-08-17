@@ -12,6 +12,9 @@ Calculator / theme level (no display needed):
   - Sectioned CPU rendering matches a single full-width computation pixel
     for pixel (section offset bug: non-uniform section widths shifted the
     last section's columns to wrong x coordinates).
+  - The auto iteration count resolves bulb boundaries at the classic view
+    and keeps growing with zoom depth (the old 500 cap rendered deep-zoom
+    filaments and bulb halos as solid black).
 
 Viewer level (needs a display; skipped otherwise):
   - Pixels stay square after resizes (a 3x3 range on a non-square canvas
@@ -143,6 +146,24 @@ def test_sectioned_render_matches_full_width():
             f"{num_sections} sections: {mismatch} pixels differ from the "
             "full-width reference (section offset bug)"
         )
+
+
+def test_auto_iterations_scale_with_zoom():
+    """The auto iteration count must resolve the classic view (slow-escaping
+    boundary points need >= ~256 iterations or bulb boundaries blur into
+    black halos), grow with zoom depth, and respect the floor/ceiling. The
+    old piecewise formula capped at 500 by zoom ~100, rendering deep-zoom
+    filaments as solid black."""
+    from Fractal_Frontier import MandelbrotViewer
+
+    f = MandelbrotViewer._auto_iterations_for
+    # Bare instance: the method does not use any instance state.
+    viewer = object.__new__(MandelbrotViewer)
+
+    assert f(viewer, 1.0) >= 256, "classic view needs enough iterations to resolve the neck"
+    assert f(viewer, 100.0) > f(viewer, 10.0) > f(viewer, 1.0), "must grow with zoom depth"
+    assert f(viewer, 1e6) == 8192, "ceiling not respected"
+    assert f(viewer, 0.26) >= 32, "floor not respected at extreme zoom-out"
 
 
 # ---------------------------------------------------------------------------

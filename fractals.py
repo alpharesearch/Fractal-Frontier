@@ -79,8 +79,11 @@ def mandelbrot_section_jit(
                 section_counts[i, j] = max_iterations
                 continue
             
-            # Period-2 bulb check: (x+1)^2 + y^2 < 0.25
-            if (x + 1.0) * (x + 1.0) + y * y < 0.25:
+            # Period-2 bulb check: the period-2 component is the disk
+            # |c+1| < 1/4, i.e. (x+1)^2 + y^2 < 0.0625. (A radius of 0.5
+            # painted a disk twice too big, swallowing the neck between the
+            # two main components and the antenna base.)
+            if (x + 1.0) * (x + 1.0) + y * y < 0.0625:
                 section_counts[i, j] = max_iterations
                 continue
             

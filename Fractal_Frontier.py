@@ -387,6 +387,20 @@ class MandelbrotViewer:
             self.status_bar.config(text=f"Switched to CPU backend ({self.num_cores} cores)")
         self.draw_mandelbrot()
 
+    def _auto_iterations_for(self, zoom_level):
+        """Base iteration count for a given zoom level.
+
+        Points near the set boundary escape slowly, and the required
+        iteration count grows with zoom depth. The previous piecewise formula
+        capped at 500 (reached by zoom ~100), so deeper views rendered bulb
+        boundaries as black halos and the filament regions between components
+        as solid black. The count now scales smoothly with zoom:
+        256 at the classic view, ~640 at zoom 10, ~2560 at zoom 100,
+        ~4050 at zoom 1000, capped at 8192 for extreme depths.
+        """
+        iters = int(256 * (max(zoom_level, 1e-9) ** 0.4))
+        return min(max(iters, 32), 8192)
+
     def _adjust_aspect(self):
         """Keep pixels square by matching the y range to the canvas aspect.
 
@@ -427,22 +441,7 @@ class MandelbrotViewer:
         self._adjust_aspect()
 
         if self.auto_adjust:
-            # Use a piecewise function for better balance between performance
-            # and quality
-            # At low zoom levels, use a shallow curve for good performance
-            # At high zoom levels, use a steeper curve for better detail
-            if self.zoom_level < 1.0:
-                # Low zoom: shallow curve for good performance
-                self.auto_iterations = int(50 * (self.zoom_level**0.15))
-            elif self.zoom_level < 10.0:
-                # Medium zoom: moderate curve for balanced performance and quality
-                self.auto_iterations = int(100 * (self.zoom_level**0.25))
-            else:
-                # High zoom: steep curve for maximum detail
-                self.auto_iterations = int(200 * (self.zoom_level**0.4))
-
-            # Add a reasonable ceiling to prevent excessive computation
-            self.auto_iterations = min(self.auto_iterations, 500)
+            self.auto_iterations = self._auto_iterations_for(self.zoom_level)
 
             # Adjust slider range based on current zoom level. Only reconfigure
             # when it actually changes: reconfiguring on every draw could clamp
