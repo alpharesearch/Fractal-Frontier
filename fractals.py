@@ -3,11 +3,20 @@ from numba import njit, prange
 
 from themes import apply_color_theme
 
-# Try to import GPU calculator
+# Try to import GPU calculator and verify a CUDA device is actually present.
+# A successful import only proves numba-cuda is installed; without a real GPU
+# the first kernel launch (or device query) raises CudaSupportError, which used
+# to crash the app at startup.
 try:
     from gpu_fractals import GPUCalculator
-    GPU_AVAILABLE = True
+    from numba import cuda as _numba_cuda
+
+    try:
+        GPU_AVAILABLE = bool(_numba_cuda.is_available()) and len(_numba_cuda.gpus) > 0
+    except Exception:
+        GPU_AVAILABLE = False
 except ImportError:
+    GPUCalculator = None
     GPU_AVAILABLE = False
 
 
@@ -16,7 +25,7 @@ except ImportError:
 # --------------------------------------------------------------------------
 @njit(parallel=True, cache=True, fastmath=True)
 def mandelbrot_section_jit(
-    section_index,
+    section_offset,
     section_width,
     width,
     height,
@@ -34,7 +43,7 @@ def mandelbrot_section_jit(
     - Periodicity checking (main cardioid and period-2 bulb)
 
     Args:
-        section_index (int): Index of the section to calculate
+        section_offset (int): First global column of this section
         section_width (int): Width of the section in pixels
         width (int): Total width of the image in pixels
         height (int): Total height of the image in pixels
@@ -57,7 +66,7 @@ def mandelbrot_section_jit(
     
     for i in prange(height):
         for j in range(section_width):
-            global_x = section_index * section_width + j
+            global_x = section_offset + j
             
             # Map pixel coordinates to complex plane
             x = x_min + global_x * x_range * width_inv
@@ -97,7 +106,7 @@ def mandelbrot_section_jit(
 
 @njit(parallel=True, cache=True, fastmath=True)
 def julia_section_jit(
-    section_index,
+    section_offset,
     section_width,
     width,
     height,
@@ -113,7 +122,7 @@ def julia_section_jit(
     Numba JIT compilation with optimizations.
 
     Args:
-        section_index (int): Index of the section to calculate
+        section_offset (int): First global column of this section
         section_width (int): Width of the section in pixels
         width (int): Total width of the image in pixels
         height (int): Total height of the image in pixels
@@ -141,7 +150,7 @@ def julia_section_jit(
     
     for i in prange(height):
         for j in range(section_width):
-            global_x = section_index * section_width + j
+            global_x = section_offset + j
             
             x = x_min + global_x * x_range * width_inv
             y = y_min + i * y_range * height_inv
@@ -164,7 +173,7 @@ def julia_section_jit(
 
 @njit(parallel=True, cache=True, fastmath=True)
 def fatou_section_jit(
-    section_index,
+    section_offset,
     section_width,
     width,
     height,
@@ -179,7 +188,7 @@ def fatou_section_jit(
     Numba JIT compilation with optimizations.
 
     Args:
-        section_index (int): Index of the section to calculate
+        section_offset (int): First global column of this section
         section_width (int): Width of the section in pixels
         width (int): Total width of the image in pixels
         height (int): Total height of the image in pixels
@@ -202,7 +211,7 @@ def fatou_section_jit(
     
     for i in prange(height):
         for j in range(section_width):
-            global_x = section_index * section_width + j
+            global_x = section_offset + j
             
             x = x_min + global_x * x_range * width_inv
             y = y_min + i * y_range * height_inv
@@ -246,6 +255,7 @@ class MandelbrotCalculator:
     """
     
     _use_gpu = GPU_AVAILABLE
+    _gpu_instance = None
 
     @classmethod
     def set_use_gpu(cls, enabled: bool):
@@ -256,9 +266,80 @@ class MandelbrotCalculator:
         else:
             cls._use_gpu = enabled
 
+    @classmethod
+    def get_gpu_calculator(cls):
+        """Return a shared GPUCalculator (created once, reused across draws)."""
+        if cls._gpu_instance is None:
+            cls._gpu_instance = GPUCalculator()
+        return cls._gpu_instance
+
+    def _compute_iterations(
+        self, fractal_type, width, height, x_min, x_max, y_min, y_max,
+        max_iterations, c=None,
+    ):
+        """
+        Compute the raw int32 iteration array for the full image.
+
+        Uses the GPU when enabled; falls back to the CPU JIT path if the GPU
+        fails at runtime (e.g. driver lost), disabling GPU mode afterwards.
+        """
+        max_iterations = max(1, int(max_iterations))
+        if self._use_gpu:
+            try:
+                gpu_calc = self.get_gpu_calculator()
+                if fractal_type == 'mandelbrot':
+                    return gpu_calc.calculate_mandelbrot_gpu(
+                        width, height, x_min, x_max, y_min, y_max, max_iterations
+                    )
+                elif fractal_type == 'julia':
+                    c = c or complex(-0.7, 0.27015)
+                    return gpu_calc.calculate_julia_gpu(
+                        width, height, x_min, x_max, y_min, y_max, max_iterations, c
+                    )
+                elif fractal_type == 'fatou':
+                    return gpu_calc.calculate_fatou_gpu(
+                        width, height, x_min, x_max, y_min, y_max, max_iterations
+                    )
+            except Exception as exc:
+                print(f"WARNING: GPU calculation failed ({exc!r}); falling back to CPU")
+                self.set_use_gpu(False)
+
+        # CPU path (full image as a single section)
+        if fractal_type == 'mandelbrot':
+            return mandelbrot_section_jit(
+                0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
+            )
+        elif fractal_type == 'julia':
+            c = c or complex(-0.7, 0.27015)
+            return julia_section_jit(
+                0, width, width, height, x_min, x_max, y_min, y_max, max_iterations, c
+            )
+        elif fractal_type == 'fatou':
+            return fatou_section_jit(
+                0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
+            )
+        raise ValueError(f"Unknown fractal type: {fractal_type!r}")
+
+    def calculate_full(self, fractal_type, width, height, x_min, x_max, y_min, y_max, max_iterations, theme, c=None):
+        """
+        Calculate the full fractal image in one GPU/CPU call.
+        More efficient than section-based calculation for GPU.
+
+        Args:
+            fractal_type: 'mandelbrot', 'julia', or 'fatou'
+            theme: color theme name, or None to return raw iteration counts
+            c: Julia constant (complex), used only for julia type
+        """
+        iterations = self._compute_iterations(
+            fractal_type, width, height, x_min, x_max, y_min, y_max, max_iterations, c
+        )
+        if theme is None:
+            return iterations
+        return apply_color_theme(iterations, max_iterations, theme)
+
     def calculate_mandelbrot_section(
         self,
-        section_index,
+        section_offset,
         section_width,
         width,
         height,
@@ -274,7 +355,7 @@ class MandelbrotCalculator:
         Called from the multiprocessing pool path; GPU is handled by calculate_full().
         """
         iterations = mandelbrot_section_jit(
-            section_index,
+            section_offset,
             section_width,
             width,
             height,
@@ -287,50 +368,9 @@ class MandelbrotCalculator:
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 
-    def calculate_full(self, fractal_type, width, height, x_min, x_max, y_min, y_max, max_iterations, theme, c=None):
-        """
-        Calculate the full fractal image in one GPU/CPU call.
-        More efficient than section-based calculation for GPU.
-        
-        Args:
-            fractal_type: 'mandelbrot', 'julia', or 'fatou'
-            c: Julia constant (complex), used only for julia type
-        """
-        if self._use_gpu:
-            gpu_calc = GPUCalculator()
-            if fractal_type == 'mandelbrot':
-                iterations = gpu_calc.calculate_mandelbrot_gpu(
-                    width, height, x_min, x_max, y_min, y_max, max_iterations
-                )
-            elif fractal_type == 'julia':
-                c = c or complex(-0.7, 0.27015)
-                iterations = gpu_calc.calculate_julia_gpu(
-                    width, height, x_min, x_max, y_min, y_max, max_iterations, c
-                )
-            elif fractal_type == 'fatou':
-                iterations = gpu_calc.calculate_fatou_gpu(
-                    width, height, x_min, x_max, y_min, y_max, max_iterations
-                )
-        else:
-            if fractal_type == 'mandelbrot':
-                iterations = mandelbrot_section_jit(
-                    0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
-                )
-            elif fractal_type == 'julia':
-                c = c or complex(-0.7, 0.27015)
-                iterations = julia_section_jit(
-                    0, width, width, height, x_min, x_max, y_min, y_max, max_iterations, c
-                )
-            elif fractal_type == 'fatou':
-                iterations = fatou_section_jit(
-                    0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
-                )
-        colors = apply_color_theme(iterations, max_iterations, theme)
-        return colors
-
     def calculate_julia_section(
         self,
-        section_index,
+        section_offset,
         section_width,
         width,
         height,
@@ -346,7 +386,7 @@ class MandelbrotCalculator:
         Calculate and color a section of the Julia set.
         """
         iterations = julia_section_jit(
-            section_index,
+            section_offset,
             section_width,
             width,
             height,
@@ -362,7 +402,7 @@ class MandelbrotCalculator:
 
     def calculate_fatou_section(
         self,
-        section_index,
+        section_offset,
         section_width,
         width,
         height,
@@ -377,7 +417,7 @@ class MandelbrotCalculator:
         Calculate and color a section of the Fatou set.
         """
         iterations = fatou_section_jit(
-            section_index,
+            section_offset,
             section_width,
             width,
             height,

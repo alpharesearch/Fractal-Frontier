@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 from Fractal_Frontier import MandelbrotCalculator, apply_color_theme
 
 # List of themes used in the application
-# All themes defined in the application.  The high‑resolution ones now clip to avoid overflow.
+# All themes defined in the application.  The high‑resolution ones (Rainbow2/3/4)
+# use finer HSV palettes with 1024/8192 hue steps.
 THEMES = [
     "Default",
     "Grayscale",
@@ -39,9 +40,8 @@ def test_apply_color_theme_shape_and_type():
     assert colors.shape == (h, w, 3), "CPU Cores theme produced wrong shape"
     assert colors.dtype == np.uint8, "CPU Cores theme produced wrong dtype"
 
-    # Test clipping behavior in high-resolution themes
-    # The themes Rainbow2, Rainbow3, and Rainbow4 now clip to avoid overflow
-    # They should not produce values outside the uint8 range (0-255)
+    # High-resolution themes use finer HSV palettes (1024/8192 hue steps);
+    # they should not produce values outside the uint8 range (0-255)
     for theme in ["Rainbow2", "Rainbow3", "Rainbow4"]:
         colors = apply_color_theme(iterations, max_iterations, theme=theme)
         assert np.all(colors >= 0) and np.all(
@@ -53,9 +53,9 @@ def test_mandelbrot_calculator_output_shape_and_black_for_max():
     """Calculate a small section and verify output shape and that max iterations map to black."""
     calc = MandelbrotCalculator()
     h = w = 8
-    # Use section_index 0, width=8, height=8
+    # Use section_offset 0, width=8, height=8
     result = calc.calculate_mandelbrot_section(
-        section_index=0,
+        section_offset=0,
         section_width=w,
         width=w,
         height=h,
@@ -75,7 +75,7 @@ def test_mandelbrot_calculator_output_shape_and_black_for_max():
     # Test Julia set calculations
     # The Julia set should produce the same output shape and have max iterations mapped to black
     result = calc.calculate_julia_section(
-        section_index=0,
+        section_offset=0,
         section_width=w,
         width=w,
         height=h,
@@ -95,7 +95,7 @@ def test_mandelbrot_calculator_output_shape_and_black_for_max():
     # Test Fatou set calculations
     # The Fatou set should produce the same output shape and have max iterations mapped to black
     result = calc.calculate_fatou_section(
-        section_index=0,
+        section_offset=0,
         section_width=w,
         width=w,
         height=h,

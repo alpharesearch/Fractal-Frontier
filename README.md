@@ -6,10 +6,11 @@ Fractal Frontier is a graphical application that allows users to explore the Man
 ## Features
 - Interactive zooming and panning of the Mandelbrot set.
 - Multiple fractal types: Mandelbrot, Julia, and Fatou sets.
-- Multiple color themes for visualizing the fractal, including high-resolution themes with clipping to avoid overflow.
+- Multiple color themes for visualizing the fractal, including high-resolution rainbow themes with finer color palettes.
 - CPU Cores theme that randomly selects a color theme for each section.
 - Bookmark functionality to save and load specific views with associated parameters.
 - Efficient calculations using multiprocessing and JIT compilation with support for different fractal types.
+- Optional GPU acceleration (Numba CUDA) when a CUDA device is present, with automatic CPU fallback otherwise.
 
 ## Project Structure
 ```

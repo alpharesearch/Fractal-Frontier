@@ -10,7 +10,9 @@ import math
 import multiprocessing
 import os
 import platform
+import queue
 import random
+import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -19,7 +21,13 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from fractals import MandelbrotCalculator, GPU_AVAILABLE
-from themes import apply_color_theme  # noqa: F401
+from themes import apply_color_theme
+
+# Bookmarks live next to the script (not in whatever CWD the app was
+# launched from), so they are found consistently.
+BOOKMARKS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "bookmarks.json"
+)
 
 
 # --------------------------------------------------------------------------
@@ -281,6 +289,25 @@ class MandelbrotViewer:
         self.pool = multiprocessing.Pool(processes=self.num_cores)
         self.calculator = MandelbrotCalculator()  # Reintroduce the calculator
         self.resize_job = None
+
+        # Rendering happens on a worker thread so the Tk main loop (and thus
+        # the UI) never freezes while fractals are being computed. Only the
+        # most recent request is ever rendered: pending requests are dropped.
+        # The worker never touches Tk directly (Tk is not thread-safe); it
+        # hands finished results back through a plain queue that the main
+        # thread polls periodically.
+        self._render_queue = queue.Queue()
+        self._result_queue = queue.Queue()
+        self._render_seq = 0
+        self._closed = False
+        self._image_item = None
+        self._render_thread = threading.Thread(
+            target=self._render_worker, daemon=True
+        )
+        self._render_thread.start()
+        self._poll_results()
+
+        self.master.protocol("WM_DELETE_WINDOW", self.on_close)
         self.draw_mandelbrot()
 
     def on_windows_mousewheel(self, event):
@@ -341,6 +368,10 @@ class MandelbrotViewer:
         """
         self.width = self.canvas.winfo_width()
         self.height = self.canvas.winfo_height()
+        # During window creation/resize the canvas may briefly report a
+        # degenerate size; skip those instead of rendering 1px images.
+        if self.width < 2 or self.height < 2:
+            return
         self.draw_mandelbrot()
 
     def toggle_gpu(self):
@@ -356,17 +387,44 @@ class MandelbrotViewer:
             self.status_bar.config(text=f"Switched to CPU backend ({self.num_cores} cores)")
         self.draw_mandelbrot()
 
+    def _adjust_aspect(self):
+        """Keep pixels square by matching the y range to the canvas aspect.
+
+        The x range and both centers are preserved; the y range is re-derived
+        as x_range * height / width around the current y center. Without this,
+        a 3x3 range drawn on a non-square canvas stretches the fractal
+        vertically (the cardioid looks elliptical). Zoom and pan keep the
+        ranges scaled equally, so this invariant holds through all of them.
+        """
+        if self.width < 2 or self.height < 2:
+            return
+        x_range = float(self.x_max - self.x_min)
+        if not (x_range > 0 and math.isfinite(x_range)):
+            return
+        y_center = (self.y_min + self.y_max) / 2
+        y_range = x_range * self.height / self.width
+        self.y_min = y_center - y_range / 2
+        self.y_max = y_center + y_range / 2
+
     def draw_mandelbrot(self):
         """
-        Calculate and draw the fractal set using multiprocessing or GPU.
+        Request a render of the current view (non-blocking).
 
-        Updates the display with the current view parameters and color theme.
+        The actual computation runs on a worker thread; the previous pending
+        request is dropped so rapid input (zooming, panning, slider drags)
+        never queues up a backlog of stale frames.
         """
-        # Set GPU mode on calculator
-        MandelbrotCalculator.set_use_gpu(self.use_gpu)
-        
-        current_range = self.x_max - self.x_min
+        if getattr(self, "_closed", False):
+            return
+        current_range = float(self.x_max - self.x_min)
+        if not (current_range > 0 and math.isfinite(current_range)):
+            # Degenerate bounds (e.g. zoomed out past float limits): reset.
+            self.x_min, self.x_max = -2.0, 1.0
+            self.y_min, self.y_max = -1.5, 1.5
+            current_range = 3.0
         self.zoom_level = self.base_range / current_range
+        # Square pixels: re-derive the y range from the canvas aspect ratio.
+        self._adjust_aspect()
 
         if self.auto_adjust:
             # Use a piecewise function for better balance between performance
@@ -386,97 +444,197 @@ class MandelbrotViewer:
             # Add a reasonable ceiling to prevent excessive computation
             self.auto_iterations = min(self.auto_iterations, 500)
 
-            # Adjust slider range based on current zoom level
-            self.offset_scale.config(from_=(2 + self.auto_iterations * -1))
-            self.offset_scale.config(
-                to=int(200 * (10**1.2) + 100 * math.log(self.zoom_level / 10))
+            # Adjust slider range based on current zoom level. Only reconfigure
+            # when it actually changes: reconfiguring on every draw could clamp
+            # the user's in-progress slider value.
+            scale_from = 2 - self.auto_iterations
+            scale_to = int(
+                200 * (10**1.2) + 100 * math.log(max(self.zoom_level, 1e-9) / 10)
             )
+            if scale_to <= scale_from:
+                scale_to = scale_from + 1
+            cur_from = int(self.offset_scale.cget("from"))
+            cur_to = int(self.offset_scale.cget("to"))
+            if cur_from != scale_from or cur_to != scale_to:
+                self.offset_scale.config(from_=scale_from, to=scale_to)
 
-        self.max_iterations = self.auto_iterations + self.iteration_offset
+        # The offset slider allows negative offsets; clamp so the themes never
+        # divide by zero or normalize against a negative iteration count.
+        self.max_iterations = max(1, int(self.auto_iterations + self.iteration_offset))
 
-        start_time = time.time()
-        num_sections = min(self.num_cores, 32)
-        section_width = self.width // num_sections
+        num_sections = max(1, min(self.num_cores, 32, self.width))
+        base_width = max(1, self.width // num_sections)
+        # The last section absorbs the remainder so the sections exactly cover
+        # the canvas width (integer division used to leave a black strip).
+        section_widths = [base_width] * num_sections
+        section_widths[-1] += self.width - base_width * num_sections
 
-        fractal_type = self.fractal_type_var.get()
+        params = {
+            "fractal_type": self.fractal_type_var.get(),
+            "width": self.width,
+            "height": self.height,
+            "x_min": float(self.x_min),
+            "x_max": float(self.x_max),
+            "y_min": float(self.y_min),
+            "y_max": float(self.y_max),
+            "max_iterations": self.max_iterations,
+            "color_theme": self.color_theme,
+            "julia_c": self.julia_c,
+            "use_gpu": self.use_gpu,
+            "num_sections": num_sections,
+            "section_widths": section_widths,
+        }
 
-        # GPU mode: calculate full image in one call (no multiprocessing needed)
-        if self.use_gpu and fractal_type in ("Mandelbrot", "Julia", "Fatou"):
-            julia_c = self.julia_c if fractal_type == "Julia" else None
-            full_array = self.calculator.calculate_full(
-                fractal_type.lower(),
-                self.width, self.height,
-                self.x_min, self.x_max, self.y_min, self.y_max,
-                self.max_iterations, self.color_theme,
-                c=julia_c
+        self._render_seq += 1
+        seq = self._render_seq
+        try:
+            self._render_queue.get_nowait()  # drop any pending request
+        except queue.Empty:
+            pass
+        self._render_queue.put((seq, params))
+        self.status_bar.config(text="Computing…")
+
+    def _render_worker(self):
+        """Worker thread loop: compute renders and hand results back.
+
+        Deliberately makes NO Tk calls: tkinter objects are not thread-safe,
+        so results are queued for the main thread's poller instead.
+        """
+        while True:
+            job = self._render_queue.get()
+            if job is None:  # shutdown sentinel
+                break
+            seq, params = job
+            start_time = time.time()
+            try:
+                full_array = self._compute_full(params)
+            except Exception as exc:  # never kill the worker thread
+                print(f"Render error (seq {seq}): {exc!r}")
+                self._result_queue.put(("error", (seq, repr(exc))))
+                continue
+            elapsed = time.time() - start_time
+            self._result_queue.put(("done", (seq, full_array, elapsed)))
+
+    def _poll_results(self):
+        """Apply finished renders on the Tk main thread (recurring)."""
+        try:
+            while True:
+                kind, payload = self._result_queue.get_nowait()
+                if kind == "done":
+                    seq, full_array, elapsed = payload
+                    self._apply_render(seq, full_array, elapsed)
+                else:
+                    seq, message = payload
+                    self._apply_render_error(seq, message)
+        except queue.Empty:
+            pass
+        if not self._closed:
+            try:
+                self.master.after(50, self._poll_results)
+            except tk.TclError:
+                pass  # root window was destroyed
+
+    def _compute_full(self, params):
+        """Compute the full RGB image for one render request (worker thread)."""
+        fractal_type = params["fractal_type"]
+        width, height = params["width"], params["height"]
+        x_min, x_max = params["x_min"], params["x_max"]
+        y_min, y_max = params["y_min"], params["y_max"]
+        max_iterations = params["max_iterations"]
+        theme = params["color_theme"]
+        num_sections = params["num_sections"]
+        section_widths = params["section_widths"]
+        use_gpu = params["use_gpu"]
+
+        MandelbrotCalculator.set_use_gpu(use_gpu)
+        is_cpu_cores_theme = theme == self.CPU_CORES_THEME
+        julia_c = params["julia_c"] if fractal_type == "Julia" else None
+
+        if use_gpu:
+            # GPU mode: one kernel for the whole image (no multiprocessing).
+            if not is_cpu_cores_theme:
+                return self.calculator.calculate_full(
+                    fractal_type.lower(), width, height,
+                    x_min, x_max, y_min, y_max,
+                    max_iterations, theme, c=julia_c,
+                )
+            # "CPU Cores" theme on GPU: compute iterations once, then apply a
+            # random theme per vertical section (mirrors the CPU behaviour).
+            iterations = self.calculator.calculate_full(
+                fractal_type.lower(), width, height,
+                x_min, x_max, y_min, y_max,
+                max_iterations, None, c=julia_c,
+            )
+            pieces = []
+            offset = 0
+            for i in range(num_sections):
+                piece = iterations[:, offset:offset + section_widths[i]]
+                pieces.append(
+                    apply_color_theme(piece, max_iterations, random.choice(self.themes))
+                )
+                offset += section_widths[i]
+            return np.hstack(pieces)
+
+        # CPU mode: use multiprocessing with sections. Each task carries its
+        # first column (offset), so sections may have different widths; the
+        # last one absorbs the width remainder, so the sections exactly cover
+        # the canvas (integer division used to leave a black strip).
+        tasks = []
+        offset = 0
+        for i in range(num_sections):
+            section_width = section_widths[i]
+            task_theme = random.choice(self.themes) if is_cpu_cores_theme else theme
+            task = (
+                offset, section_width, width, height,
+                x_min, x_max, y_min, y_max, max_iterations, task_theme,
+            )
+            if fractal_type == "Julia":
+                task = task + (julia_c,)
+            tasks.append(task)
+            offset += section_width
+
+        if fractal_type == "Mandelbrot":
+            section_arrays = self.pool.starmap(
+                self.calculator.calculate_mandelbrot_section, tasks
+            )
+        elif fractal_type == "Julia":
+            section_arrays = self.pool.starmap(
+                self.calculator.calculate_julia_section, tasks
+            )
+        elif fractal_type == "Fatou":
+            section_arrays = self.pool.starmap(
+                self.calculator.calculate_fatou_section, tasks
             )
         else:
-            # CPU mode: use multiprocessing with sections
-            tasks = []
-            if fractal_type == "Mandelbrot":
-                if self.color_theme == self.CPU_CORES_THEME:
-                    tasks = [
-                        (i, section_width, self.width, self.height,
-                         self.x_min, self.x_max, self.y_min, self.y_max,
-                         self.max_iterations, random.choice(self.themes))
-                        for i in range(num_sections)
-                    ]
-                else:
-                    tasks = [
-                        (i, section_width, self.width, self.height,
-                         self.x_min, self.x_max, self.y_min, self.y_max,
-                         self.max_iterations, self.color_theme)
-                        for i in range(num_sections)
-                    ]
-                section_arrays = self.pool.starmap(
-                    self.calculator.calculate_mandelbrot_section, tasks
-                )
-            elif fractal_type == "Julia":
-                if self.color_theme == self.CPU_CORES_THEME:
-                    tasks = [
-                        (i, section_width, self.width, self.height,
-                         self.x_min, self.x_max, self.y_min, self.y_max,
-                         self.max_iterations, random.choice(self.themes),
-                         self.julia_c)
-                        for i in range(num_sections)
-                    ]
-                else:
-                    tasks = [
-                        (i, section_width, self.width, self.height,
-                         self.x_min, self.x_max, self.y_min, self.y_max,
-                         self.max_iterations, self.color_theme, self.julia_c)
-                        for i in range(num_sections)
-                    ]
-                section_arrays = self.pool.starmap(
-                    self.calculator.calculate_julia_section, tasks
-                )
-            elif fractal_type == "Fatou":
-                if self.color_theme == self.CPU_CORES_THEME:
-                    tasks = [
-                        (i, section_width, self.width, self.height,
-                         self.x_min, self.x_max, self.y_min, self.y_max,
-                         self.max_iterations, random.choice(self.themes))
-                        for i in range(num_sections)
-                    ]
-                else:
-                    tasks = [
-                        (i, section_width, self.width, self.height,
-                         self.x_min, self.x_max, self.y_min, self.y_max,
-                         self.max_iterations, self.color_theme)
-                        for i in range(num_sections)
-                    ]
-                section_arrays = self.pool.starmap(
-                    self.calculator.calculate_fatou_section, tasks
-                )
+            raise ValueError(f"Unknown fractal type: {fractal_type!r}")
 
-            full_array = np.hstack(section_arrays)
+        return np.hstack(section_arrays)
+
+    def _apply_render(self, seq, full_array, elapsed):
+        """Display a finished render (main thread). Stale results are dropped."""
+        if self._closed or seq != self._render_seq:
+            return
         image = Image.fromarray(full_array, mode="RGB")
-        if hasattr(self, "photo"):
-            self.photo = None
         self.photo = ImageTk.PhotoImage(image)
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo)
-        elapsed = time.time() - start_time
+        # Keep exactly one canvas image item; update it in place instead of
+        # stacking a new item (and a new Tcl image) on every redraw.
+        if self._image_item is None:
+            self._image_item = self.canvas.create_image(
+                0, 0, anchor=tk.NW, image=self.photo
+            )
+        else:
+            self.canvas.itemconfigure(self._image_item, image=self.photo)
 
+        # If the GPU failed at runtime the calculator fell back to CPU; sync
+        # the viewer state and checkbox so the user can see it.
+        if (
+            self.gpu_var is not None
+            and bool(MandelbrotCalculator._use_gpu) != self.use_gpu
+        ):
+            self.use_gpu = bool(MandelbrotCalculator._use_gpu)
+            self.gpu_var.set(self.use_gpu)
+
+        num_sections = max(1, min(self.num_cores, 32, self.width))
         backend = "GPU" if self.use_gpu else f"Cores: {num_sections}"
         title_str = (
             f"{self.app_name} | {elapsed:.2f}s | "
@@ -491,6 +649,37 @@ class MandelbrotViewer:
             f"Y_min: {self.y_min:.16g}, Y_max: {self.y_max:.16g}"
         )
         self.status_bar.config(text=f"{backend} | " + coord_str)
+
+    def _apply_render_error(self, seq, message):
+        """Show a render failure in the status bar (main thread)."""
+        if self._closed or seq != self._render_seq:
+            return
+        self.status_bar.config(text=f"Render error: {message}")
+
+    def on_close(self):
+        """Window close handler: stop rendering, shut down the pool, destroy."""
+        self._close_app()
+        self.master.destroy()
+
+    def _close_app(self):
+        """Idempotent cleanup of the render thread and process pool."""
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        render_thread = getattr(self, "_render_thread", None)
+        if render_thread is not None:
+            try:
+                self._render_queue.put(None)  # shutdown sentinel
+                render_thread.join(timeout=5)
+            except Exception:
+                pass
+        pool = getattr(self, "pool", None)
+        if pool is not None:
+            try:
+                pool.close()
+                pool.join()
+            except Exception:
+                pass
 
     def save_bookmark(self):
         """
@@ -515,7 +704,7 @@ class MandelbrotViewer:
         if self.fractal_type_var.get() == "Julia":
             bookmark["julia_c"] = {"real": self.julia_c.real, "imag": self.julia_c.imag}
 
-        file_path = "bookmarks.json"
+        file_path = BOOKMARKS_FILE
         bookmarks = []
         if os.path.exists(file_path):
             try:
@@ -534,7 +723,7 @@ class MandelbrotViewer:
         """
         Open a dialog to load or delete saved bookmarks.
         """
-        file_path = "bookmarks.json"
+        file_path = BOOKMARKS_FILE
         if not os.path.exists(file_path):
             messagebox.showinfo("No Bookmarks", "No bookmarks are saved yet.")
             return
@@ -565,16 +754,18 @@ class MandelbrotViewer:
             font=("Consolas", 10),
         )
         for index, bm in enumerate(bookmarks):
+            # Old-format bookmarks may lack some fields; use safe defaults so
+            # a stale file can never crash the dialog.
             summary = (
-                f"{index+1}: {bm['timestamp']} | "
+                f"{index+1}: {bm.get('timestamp', 'no date')} | "
                 f"Fractal: {bm.get('fractal_type', 'Mandelbrot')} | "
-                f"Theme: {bm['color_theme']} | "
-                f"Zoom: {bm['zoom_level']:.2f}x | "
-                f"Auto Adj: {bm['auto_adjust']} | "
-                f"Iter_Offset: {bm['iteration_offset']} | "
-                f"Auto Iter: {bm['auto_iterations']} | "
-                f"X: {bm['x_min']:.16g} to {bm['x_max']:.16g} | "
-                f"Y: {bm['y_min']:.16g} to {bm['y_max']:.16g}"
+                f"Theme: {bm.get('color_theme', 'Default')} | "
+                f"Zoom: {float(bm.get('zoom_level', 1.0)):.2f}x | "
+                f"Auto Adj: {bm.get('auto_adjust', True)} | "
+                f"Iter_Offset: {bm.get('iteration_offset', 0)} | "
+                f"Auto Iter: {bm.get('auto_iterations', 0)} | "
+                f"X: {float(bm.get('x_min', -2.0)):.16g} to {float(bm.get('x_max', 1.0)):.16g} | "
+                f"Y: {float(bm.get('y_min', -1.5)):.16g} to {float(bm.get('y_max', 1.5)):.16g}"
             )
             lb.insert(tk.END, summary)
         lb.pack(fill=tk.BOTH, expand=True)
@@ -591,16 +782,22 @@ class MandelbrotViewer:
                 return
             index = selection[0]
             bm = bookmarks[index]
-            self.x_min = bm["x_min"]
-            self.x_max = bm["x_max"]
-            self.y_min = bm["y_min"]
-            self.y_max = bm["y_max"]
-            self.iteration_offset = bm["iteration_offset"]
+            # Safe defaults so old-format bookmarks cannot crash the loader.
+            self.x_min = float(bm.get("x_min", -2.0))
+            self.x_max = float(bm.get("x_max", 1.0))
+            self.y_min = float(bm.get("y_min", -1.5))
+            self.y_max = float(bm.get("y_max", 1.5))
+            if not (self.x_min < self.x_max and self.y_min < self.y_max):
+                messagebox.showerror(
+                    "Invalid Bookmark", "This bookmark has invalid view bounds."
+                )
+                return
+            self.iteration_offset = int(bm.get("iteration_offset", 0))
             current_max = self.offset_scale.cget("to")
             if int(current_max) < self.iteration_offset:
-                self.offset_scale.config(to=self.iteration_offset * 2)
+                self.offset_scale.config(to=max(1, self.iteration_offset * 2))
             self.offset_scale.set(self.iteration_offset)
-            self.color_theme = bm["color_theme"]
+            self.color_theme = bm.get("color_theme", "Default")
             self.color_theme_var.set(self.color_theme)
             self.auto_adjust = bm.get("auto_adjust", True)
             self.auto_adjust_var.set(self.auto_adjust)  # Update the checkbox state
@@ -687,6 +884,8 @@ class MandelbrotViewer:
             event: Mouse or keyboard event containing position information
             zoom_factor (float): Factor to zoom by (>1 zooms out, <1 zooms in)
         """
+        if self._typing_in_entry(event):
+            return
         if self.zoom_level <= 0.26 and zoom_factor >= 2.0:
             return
         if self.is_zooming:
@@ -714,6 +913,19 @@ class MandelbrotViewer:
         finally:
             self.is_zooming = False  # Reset zooming flag
 
+    def _typing_in_entry(self, event):
+        """True if the key event originated in a text Entry widget.
+
+        The pan/zoom/theme keys are bound on the root window and would
+        otherwise also fire while the user types in the Julia C entries.
+        """
+        if event is None:
+            return False
+        try:
+            return event.widget.winfo_class() in ("TEntry", "Entry")
+        except Exception:
+            return False
+
     def fluid_zoom(self, event, zoom_factor, frames=10, duration=0.09):
         """
         Perform a smooth zoom animation.
@@ -725,6 +937,8 @@ class MandelbrotViewer:
             duration (float, optional): Total animation duration in seconds.
             Defaults to 0.09.
         """
+        if self._typing_in_entry(event):
+            return
         if self.zoom_level <= 0.26 and zoom_factor >= 2.0:
             return
         if self.is_zooming:
@@ -766,15 +980,21 @@ class MandelbrotViewer:
                 Args:
                     frame (int, optional): Current animation frame. Defaults to 0.
                 """
-                if frame < frames:
+                if frame >= frames:
+                    self.is_zooming = False  # Reset zooming flag after animation
+                    return
+                try:
                     self.x_min += step_x_min
                     self.x_max += step_x_max
                     self.y_min += step_y_min
                     self.y_max += step_y_max
                     self.draw_mandelbrot()
                     self.master.after(frame_duration, animate_zoom_step, frame + 1)
-                else:
-                    self.is_zooming = False  # Reset zooming flag after animation
+                except Exception as exc:
+                    # Runs in a later event-loop tick, so the outer try/except
+                    # cannot catch this; always release the zoom lock.
+                    print(f"Zoom animation error: {exc!r}")
+                    self.is_zooming = False
 
             animate_zoom_step()
         except Exception:
@@ -787,6 +1007,8 @@ class MandelbrotViewer:
         Args:
             event: Keyboard event
         """
+        if self._typing_in_entry(event):
+            return
         self.y_min += 0.1 * (self.y_max - self.y_min)
         self.y_max += 0.1 * (self.y_max - self.y_min)
         self.draw_mandelbrot()
@@ -798,6 +1020,8 @@ class MandelbrotViewer:
         Args:
             event: Keyboard event
         """
+        if self._typing_in_entry(event):
+            return
         self.y_min -= 0.1 * (self.y_max - self.y_min)
         self.y_max -= 0.1 * (self.y_max - self.y_min)
         self.draw_mandelbrot()
@@ -809,6 +1033,8 @@ class MandelbrotViewer:
         Args:
             event: Keyboard event
         """
+        if self._typing_in_entry(event):
+            return
         self.x_min -= 0.1 * (self.x_max - self.x_min)
         self.x_max -= 0.1 * (self.x_max - self.x_min)
         self.draw_mandelbrot()
@@ -820,6 +1046,8 @@ class MandelbrotViewer:
         Args:
             event: Keyboard event
         """
+        if self._typing_in_entry(event):
+            return
         self.x_min += 0.1 * (self.x_max - self.x_min)
         self.x_max += 0.1 * (self.x_max - self.x_min)
         self.draw_mandelbrot()
@@ -845,6 +1073,8 @@ class MandelbrotViewer:
         Args:
             event: Event object, optional
         """
+        if self._typing_in_entry(event):
+            return  # let Tab move focus normally while editing an entry
         current_theme = self.color_theme_var.get()
         themes = self.themes
         current_index = themes.index(current_theme)
@@ -863,6 +1093,9 @@ class MandelbrotViewer:
         Args:
             value (str): Selected fractal type
         """
+        # Keep the dropdown variable in sync even when this method is called
+        # programmatically (e.g. from reset_view), not just from the menu.
+        self.fractal_type_var.set(value)
         if value == "Mandelbrot":
             self.x_min, self.x_max = -2.0, 1.0
             self.y_min, self.y_max = -1.5, 1.5
@@ -902,6 +1135,19 @@ class MandelbrotViewer:
             self.e_exp_i_n_slider.grid_remove()
         self.draw_mandelbrot()
 
+    def _parse_julia_c(self):
+        """Parse the Julia C entry fields; return None (with a status hint)
+        if either field does not contain a number."""
+        try:
+            real_part = float(self.julia_c_real_var.get())
+            imag_part = float(self.julia_c_imag_var.get())
+        except (TypeError, ValueError):
+            self.status_bar.config(
+                text="Invalid Julia C value – please enter numbers"
+            )
+            return None
+        return complex(real_part, imag_part)
+
     def update_julia_c(self, event=None):
         """
         Update the Julia set constant based on input fields.
@@ -909,18 +1155,20 @@ class MandelbrotViewer:
         Args:
             event: Event object, optional
         """
-        real_part = self.julia_c_real_var.get()
-        imag_part = self.julia_c_imag_var.get()
-        self.julia_c = complex(real_part, imag_part)
+        c = self._parse_julia_c()
+        if c is None:
+            return
+        self.julia_c = c
         self.draw_mandelbrot()
 
     def update_julia_c_slider(self):
         """
         Update the Julia set constant based on slider values.
         """
-        real_part = self.julia_c_real_var.get()
-        imag_part = self.julia_c_imag_var.get()
-        self.julia_c = complex(real_part, imag_part)
+        c = self._parse_julia_c()
+        if c is None:
+            return
+        self.julia_c = c
         self.draw_mandelbrot()
 
     def update_e_exp_i_n_slider(self):
@@ -941,11 +1189,14 @@ class MandelbrotViewer:
         """
         Clean up resources when the object is deleted.
 
-        Ensures the multiprocessing pool is properly closed.
+        Ensures the render thread and multiprocessing pool are closed.
+        Never raises (destructor context) and tolerates partially
+        initialized instances.
         """
-        if hasattr(self, "pool"):
-            self.pool.close()
-            self.pool.join()
+        try:
+            self._close_app()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
@@ -956,7 +1207,8 @@ if __name__ == "__main__":
     """
     multiprocessing.freeze_support()
     root = tk.Tk()
-    root.geometry("320x240")
+    # (The previous "320x240" geometry was silently overridden by minsize.)
+    root.geometry("800x680")
     root.minsize(800, 680)
     viewer = MandelbrotViewer(root)
     root.mainloop()

@@ -193,10 +193,12 @@ class GPUCalculator:
         d_result = cuda.to_device(h_result)
 
         threads_per_block = (32, 8)
+        # Launch exactly as many blocks as needed; the kernel already guards
+        # against out-of-range thread indices. (Launching an extra SM-count of
+        # blocks only wasted work in threads that immediately returned.)
         blocks_per_grid_x = (width + threads_per_block[0] - 1) // threads_per_block[0]
         blocks_per_grid_y = (height + threads_per_block[1] - 1) // threads_per_block[1]
-        sm_count = max(1, self.device.MULTIPROCESSOR_COUNT)
-        blocks_per_grid = (blocks_per_grid_x * sm_count, blocks_per_grid_y)
+        blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
 
         mandelbrot_kernel[blocks_per_grid, threads_per_block](
             d_result,
@@ -220,10 +222,12 @@ class GPUCalculator:
         d_result = cuda.to_device(h_result)
 
         threads_per_block = (32, 8)
+        # Launch exactly as many blocks as needed; the kernel already guards
+        # against out-of-range thread indices. (Launching an extra SM-count of
+        # blocks only wasted work in threads that immediately returned.)
         blocks_per_grid_x = (width + threads_per_block[0] - 1) // threads_per_block[0]
         blocks_per_grid_y = (height + threads_per_block[1] - 1) // threads_per_block[1]
-        sm_count = max(1, self.device.MULTIPROCESSOR_COUNT)
-        blocks_per_grid = (blocks_per_grid_x * sm_count, blocks_per_grid_y)
+        blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
 
         julia_kernel[blocks_per_grid, threads_per_block](
             d_result,
@@ -249,10 +253,12 @@ class GPUCalculator:
         d_result = cuda.to_device(h_result)
 
         threads_per_block = (32, 8)
+        # Launch exactly as many blocks as needed; the kernel already guards
+        # against out-of-range thread indices. (Launching an extra SM-count of
+        # blocks only wasted work in threads that immediately returned.)
         blocks_per_grid_x = (width + threads_per_block[0] - 1) // threads_per_block[0]
         blocks_per_grid_y = (height + threads_per_block[1] - 1) // threads_per_block[1]
-        sm_count = max(1, self.device.MULTIPROCESSOR_COUNT)
-        blocks_per_grid = (blocks_per_grid_x * sm_count, blocks_per_grid_y)
+        blocks_per_grid = (blocks_per_grid_x, blocks_per_grid_y)
 
         fatou_kernel[blocks_per_grid, threads_per_block](
             d_result,

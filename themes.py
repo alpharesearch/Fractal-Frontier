@@ -18,6 +18,9 @@ def apply_color_theme(iterations, max_iterations, theme="Default"):
     Returns:
         numpy.ndarray: RGB color array with shape (height, width, 3)
     """
+    # Guard against zero/negative iteration counts (the GUI slider allows a
+    # negative offset); without this the normalization below divides by zero.
+    max_iterations = max(1, int(max_iterations))
 
     def default_theme(iterations, max_iterations, colors):
         """Default color theme with blue-green gradient."""
@@ -76,41 +79,35 @@ def apply_color_theme(iterations, max_iterations, theme="Default"):
         mask = iterations == max_iterations
         colors[mask] = (0, 0, 0)
 
-    def rainbow2_theme(iterations, max_iterations, colors):
-        """Enhanced rainbow theme with higher color values –
-        clipped to avoid overflow."""
-        palette = np.empty((256, 3), dtype=np.uint8)
-        for i in range(256):
-            h = i / 256.0
+    def _build_hsv_palette(steps):
+        """Build an RGB uint8 palette of `steps` evenly spaced hues."""
+        palette = np.empty((steps, 3), dtype=np.uint8)
+        for i in range(steps):
+            h = i / steps
             r, g, b = colorsys.hsv_to_rgb(h, 1.0, 1.0)
-            # Scale up then clip to 255 before casting.
-            palette[i] = np.clip(np.array([r, g, b]) * 1024, 0, 255).astype(np.uint8)
+            # hsv_to_rgb returns values in [0, 1]; scale to the uint8 range.
+            palette[i] = (int(r * 255), int(g * 255), int(b * 255))
+        return palette
+
+    def rainbow2_theme(iterations, max_iterations, colors):
+        """Rainbow theme with a 256‑step hue palette."""
+        palette = _build_hsv_palette(256)
         mod_vals = np.mod(iterations, 256)
         colors[:] = palette[mod_vals]
         mask = iterations == max_iterations
         colors[mask] = (0, 0, 0)
 
     def rainbow3_theme(iterations, max_iterations, colors):
-        """Rainbow theme with 1024 colors – clipped to avoid overflow."""
-        palette = np.empty((1024, 3), dtype=np.uint8)
-        for i in range(1024):
-            h = i / 1024.0
-            r, g, b = colorsys.hsv_to_rgb(h, 1.0, 1.0)
-            palette[i] = np.clip(np.array([r, g, b]) * 1024, 0, 255).astype(np.uint8)
+        """Rainbow theme with a finer 1024‑step hue palette."""
+        palette = _build_hsv_palette(1024)
         mod_vals = np.mod(iterations, 1024)
         colors[:] = palette[mod_vals]
         mask = iterations == max_iterations
         colors[mask] = (0, 0, 0)
 
     def rainbow4_theme(iterations, max_iterations, colors):
-        """Return the original 8192‑color palette but clip to 255 so
-        NumPy doesn’t raise an error."""
-        palette = np.empty((8192, 3), dtype=np.uint8)
-        for i in range(8192):
-            h = i / 8192.0
-            r, g, b = colorsys.hsv_to_rgb(h, 1.0, 1.0)
-            # Scale to the 8192‑step palette then clip to 255 before cast.
-            palette[i] = np.clip(np.array([r, g, b]) * 8192, 0, 255).astype(np.uint8)
+        """Rainbow theme with a very fine 8192‑step hue palette."""
+        palette = _build_hsv_palette(8192)
         mod_vals = np.mod(iterations, 8192)
         colors[:] = palette[mod_vals]
         mask = iterations == max_iterations
