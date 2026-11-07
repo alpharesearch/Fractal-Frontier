@@ -28,7 +28,9 @@ Viewer level (needs a display; skipped otherwise):
   - Keyboard zoom anchors the view CENTER (Tk event.type is the string
     '2'; comparing it with int 2 made the keyboard branch dead code and
     keyboard zoom anchored at the mouse pointer instead).
-  - Mouse zoom anchors the point under the pointer.
+  - Mouse zoom scales AROUND the pointer: the world point under the
+    cursor is preserved (the old formula centered the final view on the
+    cursor point - overshooting the shift everywhere off-center).
   - Panning preserves the view size (delta recomputed after moving the
     first bound used to shrink the viewport 1% per pan keystroke).
   - Wheel notches coalesce into ONE animated, pointer-anchored zoom;
@@ -434,17 +436,48 @@ def test_keyboard_zoom_anchors_view_center(app):
 
 
 def test_mouse_zoom_anchors_pointer(app):
-    """Mouse zoom must keep anchoring at the point under the cursor (the
-    keyboard fix must not swallow mouse events into the center path)."""
+    """Mouse zoom must SCALE AROUND the cursor: the world point under the
+    pointer lands exactly where it started. The old formula centered the
+    final view ON the cursor point - identical only when the cursor is the
+    center, overshooting the shift toward the cursor everywhere else."""
     viewer, root = app
-    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
-    viewer.width, viewer.height = 160, 120
-    viewer.zoom(_MouseEv(x=0, y=0), 0.5)  # pointer at canvas top-left
-    # The world point under (0, 0) is (x_min, y_min) = (-2, -1.5); the zoomed
-    # view must be centered there.
-    assert (viewer.x_min + viewer.x_max) / 2 == pytest.approx(-2.0, abs=1e-12)
-    assert (viewer.y_min + viewer.y_max) / 2 == pytest.approx(-1.5, abs=1e-12)
-    assert viewer.x_max - viewer.x_min == pytest.approx(1.5, rel=1e-9)
+
+    def run(x, y, factor):
+        # Aspect-consistent canvas (160x120 => y range = x range * 120/160)
+        # so the square-pixel adjustment cannot legitimately alter the y
+        # anchor during the zoom.
+        viewer.width, viewer.height = 160, 120
+        viewer.x_min, viewer.x_max = -2.0, 1.0
+        viewer.y_min, viewer.y_max = -1.125, 1.125
+        fx, fy = x / 160.0, y / 120.0
+        wx = viewer.x_min + fx * (viewer.x_max - viewer.x_min)
+        wy = viewer.y_min + fy * (viewer.y_max - viewer.y_min)
+        viewer.zoom(_MouseEv(x=x, y=y), factor)
+        w = viewer.x_max - viewer.x_min
+        h = viewer.y_max - viewer.y_min
+        assert w == pytest.approx(3.0 * factor, rel=1e-9)
+        assert viewer.x_min + fx * w == pytest.approx(wx, abs=1e-12), (
+            "zoom moved the world point under the cursor horizontally "
+            "(anchor overshoot)"
+        )
+        assert viewer.y_min + fy * h == pytest.approx(wy, abs=1e-12), (
+            "zoom moved the world point under the cursor vertically "
+            "(anchor overshoot)"
+        )
+        return w
+
+    # Center: the trivial case that always worked.
+    assert run(80, 60, 0.5) == pytest.approx(1.5, rel=1e-9)
+    # Corner: x_min/y_min must stay put under zoom-in.
+    assert run(0, 0, 0.5) == pytest.approx(1.5, rel=1e-9)
+    assert viewer.x_min == pytest.approx(-2.0, abs=1e-12)
+    assert viewer.y_min == pytest.approx(-1.125, abs=1e-12)
+    # Mid off-center: the classic overshoot case, in and out.
+    assert run(120, 90, 0.5) == pytest.approx(1.5, rel=1e-9)
+    assert run(120, 90, 2.0) == pytest.approx(6.0, rel=1e-9)
+    # Extreme off-center (95%).
+    assert run(152, 114, 0.8) == pytest.approx(2.4, rel=1e-9)
+
     viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
     viewer.draw_mandelbrot()
 

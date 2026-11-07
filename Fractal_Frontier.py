@@ -1015,13 +1015,15 @@ class MandelbrotViewer:
                 center_x = self.x_min + (event.x / self.width) * width
                 center_y = self.y_min + (event.y / self.height) * height
 
-            new_width = width * zoom_factor
-            new_height = height * zoom_factor
-
-            self.x_min = center_x - new_width / 2
-            self.x_max = center_x + new_width / 2
-            self.y_min = center_y - new_height / 2
-            self.y_max = center_y + new_height / 2
+            # Mouse-anchored zoom: SCALE AROUND the cursor point so the
+            # world point under the cursor lands exactly where it started.
+            # (The old "center on the cursor point" formula only agrees with
+            # this when the cursor IS the center, and overshoots the shift
+            # toward the cursor by a factor of ~1/(1-factor) everywhere else.)
+            self.x_min = center_x - (center_x - self.x_min) * zoom_factor
+            self.x_max = center_x + (self.x_max - center_x) * zoom_factor
+            self.y_min = center_y - (center_y - self.y_min) * zoom_factor
+            self.y_max = center_y + (self.y_max - center_y) * zoom_factor
             self.draw_mandelbrot()
         finally:
             self.is_zooming = False  # Reset zooming flag
@@ -1070,13 +1072,11 @@ class MandelbrotViewer:
                 center_x = self.x_min + (event.x / self.width) * width
                 center_y = self.y_min + (event.y / self.height) * height
 
-            new_width = width * zoom_factor
-            new_height = height * zoom_factor
-
-            target_x_min = center_x - new_width / 2
-            target_x_max = center_x + new_width / 2
-            target_y_min = center_y - new_height / 2
-            target_y_max = center_y + new_height / 2
+            # Mouse-anchored target (see zoom()): scale around the cursor.
+            target_x_min = center_x - (center_x - self.x_min) * zoom_factor
+            target_x_max = center_x + (self.x_max - center_x) * zoom_factor
+            target_y_min = center_y - (center_y - self.y_min) * zoom_factor
+            target_y_max = center_y + (self.y_max - center_y) * zoom_factor
 
             step_x_min = (target_x_min - self.x_min) / frames
             step_x_max = (target_x_max - self.x_max) / frames
