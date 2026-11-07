@@ -31,6 +31,9 @@ Viewer level (needs a display; skipped otherwise):
   - Mouse zoom anchors the point under the pointer.
   - Panning preserves the view size (delta recomputed after moving the
     first bound used to shrink the viewport 1% per pan keystroke).
+  - Wheel notches coalesce into ONE animated, pointer-anchored zoom;
+    Windows/macOS deltas map proportionally (trackpads scale smoothly).
+  - The zoom-out floor reports "Maximum zoom-out reached" in the status bar.
   - Invalid Julia C input does not raise.
   - Degenerate view bounds reset instead of crashing the render request.
   - Bookmarks are written to BOOKMARKS_FILE and old formats load safely;
@@ -479,6 +482,70 @@ def test_pan_preserves_view_size(app):
     viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
     viewer.width, viewer.height = 160, 120
     viewer.draw_mandelbrot()
+
+
+def test_wheel_factor_from_delta():
+    """Windows/macOS wheel deltas must map to proportional zoom factors:
+    one 120-unit notch = the notch factor; trackpad micro-deltas scale
+    smoothly; direction: scroll up (positive delta) zooms in."""
+    from Fractal_Frontier import wheel_factor_from_delta
+
+    assert wheel_factor_from_delta(120) == pytest.approx(1.0 / 1.25, rel=1e-9)
+    assert wheel_factor_from_delta(-120) == pytest.approx(1.25, rel=1e-9)
+    assert wheel_factor_from_delta(0) == 1.0
+    # Small trackpad deltas stay gentle and in the same direction.
+    small_in = wheel_factor_from_delta(10)
+    small_out = wheel_factor_from_delta(-10)
+    assert small_in < 1.0 < small_out
+    assert small_in > 0.97 and small_out < 1.04
+
+
+def test_wheel_notches_coalesce_into_one_animated_zoom(app):
+    """Wheel gestures must accumulate for WHEEL_COALESCE_MS and apply as a
+    single animated, pointer-anchored zoom (previously each notch was an
+    instant jump chained onto a stale, lagging frame)."""
+    viewer, root = app
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    viewer.width, viewer.height = 160, 120
+
+    class WheelEv:
+        type = "4"  # ButtonPress-type wheel event (Tk string type)
+
+        def __init__(self, x, y, widget):
+            self.x, self.y, self.widget = x, y, widget
+
+    # Three zoom-in notches anchored at the canvas CENTER: they must
+    # combine into 0.8^3 and keep the view center where it was.
+    factor = 1.0 / 1.25
+    for _ in range(3):
+        viewer._queue_wheel(WheelEv(80, 60, root), factor)
+    _pump(root, 2500)
+
+    assert viewer.x_max - viewer.x_min == pytest.approx(
+        3.0 * factor**3, rel=1e-6
+    ), "wheel notches did not coalesce into the accumulated factor"
+    assert (viewer.x_min + viewer.x_max) / 2 == pytest.approx(-0.5, abs=1e-9)
+    assert (viewer.y_min + viewer.y_max) / 2 == pytest.approx(0.0, abs=1e-9)
+    assert viewer._wheel_accum == 1.0, "accumulator not reset after flush"
+    assert not viewer.is_zooming
+    assert _wait_for_render(viewer, root)
+
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    viewer.draw_mandelbrot()
+
+
+def test_zoom_out_floor_shows_status_hint(app):
+    """The zoom-out guard (zoom_level <= 0.26) must tell the user why the
+    view stopped widening instead of swallowing the gesture silently."""
+    viewer, root = app
+    saved = viewer.zoom_level
+    viewer.zoom_level = 0.2  # pretend we are at the floor
+    x0, w0 = viewer.x_min, viewer.x_max - viewer.x_min
+    viewer.zoom(_MouseEv(), 2.0)
+    assert "Maximum zoom-out reached" in str(viewer.status_bar.cget("text"))
+    assert viewer.x_min == x0 and viewer.x_max == w0 + x0, "floor guard moved the view"
+    assert not viewer.is_zooming
+    viewer.zoom_level = saved
 
 
 def test_cpu_cores_randomizer_excludes_meta_theme(app):

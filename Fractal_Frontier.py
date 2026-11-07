@@ -29,6 +29,19 @@ BOOKMARKS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "bookmarks.json"
 )
 
+# Per-notch wheel zoom factor (zoom-out; zoom-in is its reciprocal rounded
+# the same way) used on every platform: a 120-unit wheel notch maps to 1.25x,
+# smaller trackpad deltas scale proportionally.
+WHEEL_NOTCH_FACTOR = 1.25
+WHEEL_COALESCE_MS = 120  # wheel notches merge into one animated zoom
+
+
+def wheel_factor_from_delta(delta):
+    """Wheel factor for a Tk delta (Windows/macOS): scroll up (positive,
+    zoom in) => 1/WHEEL_NOTCH_FACTOR per 120 units; scroll down (negative,
+    zoom out) => WHEEL_NOTCH_FACTOR. Trackpad micro-deltas scale smoothly."""
+    return WHEEL_NOTCH_FACTOR ** (-delta / 120.0)
+
 
 # --------------------------------------------------------------------------
 # MAIN VIEWER CLASS
@@ -265,14 +278,30 @@ class MandelbrotViewer:
         self.canvas.bind("<Button-2>", self.advance_theme)
         self.canvas.bind("<Button-3>", lambda event: self.fluid_zoom(event, 8))
 
+        # Wheel zoom: notches are accumulated for WHEEL_COALESCE_MS and
+        # applied as ONE animated, pointer-anchored zoom, so a wheel spin
+        # feels like the smooth click zoom instead of a chain of hard jumps.
+        self._wheel_accum = 1.0
+        self._wheel_x = 0
+        self._wheel_y = 0
+        self._wheel_widget = self.canvas
+        self._wheel_job = None
         system = platform.system()
         if system == "Linux":
-            self.canvas.bind("<Button-4>", lambda event: self.zoom(event, 0.75))
-            self.canvas.bind("<Button-5>", lambda event: self.zoom(event, 1.5))
+            self.canvas.bind(
+                "<Button-4>", lambda e: self._queue_wheel(e, 1.0 / WHEEL_NOTCH_FACTOR)
+            )
+            self.canvas.bind(
+                "<Button-5>", lambda e: self._queue_wheel(e, WHEEL_NOTCH_FACTOR)
+            )
         elif system == "Windows":
-            self.canvas.bind("<MouseWheel>", self.on_windows_mousewheel)
+            # MouseWheelTiny/MouseWheelBig are the Precision-touchpad
+            # variants; without them two-finger scrolling does nothing.
+            for seq in ("<MouseWheel>", "<MouseWheelTiny>", "<MouseWheelBig>"):
+                self.canvas.bind(seq, self._queue_delta_wheel)
         elif system == "Darwin":  # macOS
-            self.canvas.bind("<MouseWheel>", self.on_macos_mousewheel)
+            for seq in ("<MouseWheel>", "<MacMouseWheel>"):
+                self.canvas.bind(seq, self._queue_delta_wheel)
 
         self.master.bind("<Tab>", self.advance_theme)
         self.master.bind("<Next>", lambda event: self.zoom(event, 0.5))
@@ -316,23 +345,50 @@ class MandelbrotViewer:
         self.master.protocol("WM_DELETE_WINDOW", self.on_close)
         self.draw_mandelbrot()
 
-    def on_windows_mousewheel(self, event):
-        """Handle mouse wheel events on Windows."""
-        # In Windows,
-        # event.delta is positive when scrolling up and negative when scrolling down
-        if event.delta > 0:
-            self.zoom(event, 0.75)  # Zoom in
-        else:
-            self.zoom(event, 1.5)  # Zoom out
+    class _WheelEvent:
+        """Pseudo mouse event for the coalesced wheel flush: wheel events
+        are ButtonPress-type, anchored at the last cursor position seen."""
 
-    def on_macos_mousewheel(self, event):
-        """Handle mouse wheel events on macOS."""
-        # In macOS,
-        # event.delta works similarly to Windows but may have different scaling
-        if event.delta > 0:
-            self.zoom(event, 0.75)  # Zoom in
-        else:
-            self.zoom(event, 1.5)  # Zoom out
+        type = "4"
+
+        def __init__(self, x, y, widget):
+            self.x = x
+            self.y = y
+            self.widget = widget
+
+    def _queue_wheel(self, event, factor):
+        """Accumulate one wheel notch (factor + anchor); flush as a single
+        animated zoom after the gesture pauses."""
+        if self._wheel_job is not None:
+            self.master.after_cancel(self._wheel_job)
+        self._wheel_accum *= factor
+        self._wheel_x = event.x
+        self._wheel_y = event.y
+        self._wheel_widget = event.widget
+        self._wheel_job = self.master.after(WHEEL_COALESCE_MS, self._flush_wheel)
+
+    def _queue_delta_wheel(self, event):
+        """Windows/macOS wheel entry: convert the Tk delta to a factor."""
+        self._queue_wheel(event, wheel_factor_from_delta(event.delta))
+
+    def _flush_wheel(self):
+        """Apply the accumulated wheel factor as one animated zoom."""
+        self._wheel_job = None
+        if getattr(self, "_closed", False):
+            return
+        factor = self._wheel_accum
+        self._wheel_accum = 1.0
+        if abs(factor - 1.0) < 1e-9:
+            return
+        if self.is_zooming:
+            # A click/fluid animation is running; retry shortly so the
+            # gesture is applied smoothly instead of being swallowed.
+            self._wheel_job = self.master.after(60, self._flush_wheel)
+            return
+        ev = self._WheelEvent(self._wheel_x, self._wheel_y, self._wheel_widget)
+        self.fluid_zoom(
+            ev, factor, frames=6, duration=WHEEL_COALESCE_MS / 1000.0 + 0.05
+        )
 
     def slider_update(self, value):
         """
@@ -940,6 +996,7 @@ class MandelbrotViewer:
         if self._typing_in_entry(event):
             return
         if self.zoom_level <= 0.26 and zoom_factor >= 2.0:
+            self.status_bar.config(text="Maximum zoom-out reached")
             return
         if self.is_zooming:
             return
@@ -996,6 +1053,7 @@ class MandelbrotViewer:
         if self._typing_in_entry(event):
             return
         if self.zoom_level <= 0.26 and zoom_factor >= 2.0:
+            self.status_bar.config(text="Maximum zoom-out reached")
             return
         if self.is_zooming:
             return
