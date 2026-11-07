@@ -3,8 +3,7 @@
 import numpy as np
 import pytest
 
-from fractals import (GPU_AVAILABLE, MandelbrotCalculator,
-                      mandelbrot_section_jit)
+from fractals import GPU_AVAILABLE, MandelbrotCalculator, mandelbrot_section_jit
 
 
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="GPU not available")
@@ -89,6 +88,26 @@ class TestGPUCalculator:
         diff = gpu_result != cpu_result
         diff_pct = np.sum(diff) / gpu_result.size
         assert diff_pct < 0.001  # Less than 0.1% pixel difference
+
+    def test_mandelbrot_float32_matches_float64(self):
+        """The float32 kernel should match the float64 kernel closely at the
+        classic view (where float32 is selected by the viewer)."""
+        from gpu_fractals import GPUCalculator
+
+        gpu = GPUCalculator()
+        args = (
+            self.width,
+            self.height,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
+        )
+        result32 = gpu.calculate_mandelbrot_gpu(*args, precision="float32")
+        result64 = gpu.calculate_mandelbrot_gpu(*args, precision="float64")
+        diff_pct = np.mean(result32 != result64)
+        assert diff_pct < 0.01, f"float32/float64 mismatch: {diff_pct:.3%}"
 
     def test_julia_gpu_output_shape(self):
         """GPU Julia should return correct shape array."""
@@ -313,6 +332,17 @@ class TestGPUCalculator:
         )
         # GPU is faster but transfer overhead limits speedup for single-frame benchmarks
         assert speedup > 2.0, f"GPU should be at least 2x faster, got {speedup:.1f}x"
+
+
+def test_invalid_precision_rejected():
+    """Only the two supported GPU precisions are accepted."""
+    from gpu_fractals import GPUCalculator
+
+    with pytest.raises(ValueError):
+        GPUCalculator._validate_precision("float16")
+
+    for precision in ("float32", "float64"):
+        GPUCalculator._validate_precision(precision)  # must not raise
 
 
 @pytest.mark.skipif(GPU_AVAILABLE, reason="Test requires GPU to be unavailable")

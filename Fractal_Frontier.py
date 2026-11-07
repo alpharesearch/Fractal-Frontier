@@ -35,6 +35,11 @@ BOOKMARKS_FILE = os.path.join(
 WHEEL_NOTCH_FACTOR = 1.25
 WHEEL_COALESCE_MS = 120  # wheel notches merge into one animated zoom
 
+# Float32 GPU arithmetic is ~32-64x faster than float64 on consumer cards,
+# but its ~1e-7 relative precision stops resolving deep-zoom detail.  Use it
+# only up to this zoom level; deeper views keep the float64 kernel.
+GPU_FLOAT32_MAX_ZOOM = 10.0
+
 
 def wheel_factor_from_delta(delta):
     """Wheel factor for a Tk delta (Windows/macOS): scroll up (positive,
@@ -82,6 +87,7 @@ class MandelbrotViewer:
 
         # GPU mode - enabled by default if available
         self.use_gpu = GPU_AVAILABLE
+        self._render_precision = "float64"
 
         self.canvas = tk.Canvas(
             master, width=self.width, height=self.height, bg="black"
@@ -542,6 +548,8 @@ class MandelbrotViewer:
         section_widths = [base_width] * num_sections
         section_widths[-1] += self.width - base_width * num_sections
 
+        precision = "float32" if self.zoom_level <= GPU_FLOAT32_MAX_ZOOM else "float64"
+        self._render_precision = precision
         params = {
             "fractal_type": self.fractal_type_var.get(),
             "width": self.width,
@@ -554,6 +562,7 @@ class MandelbrotViewer:
             "color_theme": self.color_theme,
             "julia_c": self.julia_c,
             "use_gpu": self.use_gpu,
+            "precision": precision,
             "num_sections": num_sections,
             "section_widths": section_widths,
         }
@@ -618,6 +627,7 @@ class MandelbrotViewer:
         num_sections = params["num_sections"]
         section_widths = params["section_widths"]
         use_gpu = params["use_gpu"]
+        precision = params.get("precision", "float64")
 
         MandelbrotCalculator.set_use_gpu(use_gpu)
         is_cpu_cores_theme = theme == self.CPU_CORES_THEME
@@ -637,6 +647,7 @@ class MandelbrotViewer:
                     max_iterations,
                     theme,
                     c=julia_c,
+                    precision=precision,
                 )
             # "CPU Cores" theme on GPU: compute iterations once, then apply a
             # random theme per vertical section (mirrors the CPU behaviour).
@@ -651,6 +662,7 @@ class MandelbrotViewer:
                 max_iterations,
                 None,
                 c=julia_c,
+                precision=precision,
             )
             pieces = []
             offset = 0
@@ -755,7 +767,11 @@ class MandelbrotViewer:
             self.gpu_var.set(self.use_gpu)
 
         num_sections = max(1, min(self.num_cores, 32, self.width))
-        backend = "GPU" if self.use_gpu else f"Cores: {num_sections}"
+        backend = (
+            f"GPU ({self._render_precision})"
+            if self.use_gpu
+            else f"Cores: {num_sections}"
+        )
         title_str = (
             f"{self.app_name} | {elapsed:.2f}s | "
             + f"{self.zoom_level:.2f}x | Iter: {self.max_iterations} "

@@ -325,12 +325,17 @@ class MandelbrotCalculator:
         y_max,
         max_iterations,
         c=None,
+        precision="float64",
     ):
         """
         Compute the raw int32 iteration array for the full image.
 
         Uses the GPU when enabled; falls back to the CPU JIT path if the GPU
         fails at runtime (e.g. driver lost), disabling GPU mode afterwards.
+
+        `precision` is passed to the GPU backend: "float32" is faster but
+        only safe for shallow zooms, "float64" preserves deep-zoom detail.
+        CPU paths always use double precision.
         """
         max_iterations = max(1, int(max_iterations))
         if self._use_gpu:
@@ -338,7 +343,14 @@ class MandelbrotCalculator:
                 gpu_calc = self.get_gpu_calculator()
                 if fractal_type == "mandelbrot":
                     return gpu_calc.calculate_mandelbrot_gpu(
-                        width, height, x_min, x_max, y_min, y_max, max_iterations
+                        width,
+                        height,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
+                        max_iterations,
+                        precision=precision,
                     )
                 elif fractal_type == "julia":
                     # "c or default" would replace the valid c = 0j (falsy!)
@@ -346,11 +358,26 @@ class MandelbrotCalculator:
                     if c is None:
                         c = complex(-0.7, 0.27015)
                     return gpu_calc.calculate_julia_gpu(
-                        width, height, x_min, x_max, y_min, y_max, max_iterations, c
+                        width,
+                        height,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
+                        max_iterations,
+                        c,
+                        precision=precision,
                     )
                 elif fractal_type == "fatou":
                     return gpu_calc.calculate_fatou_gpu(
-                        width, height, x_min, x_max, y_min, y_max, max_iterations
+                        width,
+                        height,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
+                        max_iterations,
+                        precision=precision,
                     )
             except Exception as exc:
                 print(f"WARNING: GPU calculation failed ({exc!r}); falling back to CPU")
@@ -385,6 +412,7 @@ class MandelbrotCalculator:
         max_iterations,
         theme,
         c=None,
+        precision="float64",
     ):
         """
         Calculate the full fractal image in one GPU/CPU call.
@@ -394,9 +422,19 @@ class MandelbrotCalculator:
             fractal_type: 'mandelbrot', 'julia', or 'fatou'
             theme: color theme name, or None to return raw iteration counts
             c: Julia constant (complex), used only for julia type
+            precision: GPU precision, "float32" or "float64"
         """
         iterations = self._compute_iterations(
-            fractal_type, width, height, x_min, x_max, y_min, y_max, max_iterations, c
+            fractal_type,
+            width,
+            height,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            max_iterations,
+            c,
+            precision=precision,
         )
         if theme is None:
             return iterations
