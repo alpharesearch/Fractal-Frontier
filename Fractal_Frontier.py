@@ -668,13 +668,16 @@ class MandelbrotViewer:
         # first column (offset), so sections may have different widths; the
         # last one absorbs the width remainder, so the sections exactly cover
         # the canvas (integer division used to leave a black strip).
+        #
+        # Workers return raw iteration counts, not RGB.  Colour mapping is a
+        # single pass over the whole image afterwards, which avoids doing the
+        # palette work (and the boolean-mask work) once per section.  For the
+        # "CPU Cores" theme the colour pass is still done per section because
+        # each section deliberately gets a different random theme.
         tasks = []
         offset = 0
         for i in range(num_sections):
             section_width = section_widths[i]
-            task_theme = (
-                random.choice(self._theme_choices) if is_cpu_cores_theme else theme
-            )
             task = (
                 offset,
                 section_width,
@@ -685,7 +688,7 @@ class MandelbrotViewer:
                 y_min,
                 y_max,
                 max_iterations,
-                task_theme,
+                None,
             )
             if fractal_type == "Julia":
                 task = task + (julia_c,)
@@ -707,7 +710,22 @@ class MandelbrotViewer:
         else:
             raise ValueError(f"Unknown fractal type: {fractal_type!r}")
 
-        return np.hstack(section_arrays)
+        iterations = np.hstack(section_arrays)
+
+        if is_cpu_cores_theme:
+            pieces = []
+            offset = 0
+            for i in range(num_sections):
+                piece = iterations[:, offset : offset + section_widths[i]]
+                pieces.append(
+                    apply_color_theme(
+                        piece, max_iterations, random.choice(self._theme_choices)
+                    )
+                )
+                offset += section_widths[i]
+            return np.hstack(pieces)
+
+        return apply_color_theme(iterations, max_iterations, theme)
 
     def _apply_render(self, seq, full_array, elapsed):
         """Display a finished render (main thread). Stale results are dropped."""

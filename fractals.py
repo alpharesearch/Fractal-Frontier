@@ -41,7 +41,8 @@ def mandelbrot_section_jit(
     of the image using Numba JIT compilation with multiple optimizations:
     - Fast math optimizations
     - Unrolled complex arithmetic (avoids complex object allocations)
-    - Periodicity checking (main cardioid and period-2 bulb)
+    - Periodicity checking (main cardioid, period-2 bulb, and Brent cycle
+      detection for interior points at high iteration counts)
 
     Args:
         section_offset (int): First global column of this section
@@ -88,11 +89,19 @@ def mandelbrot_section_jit(
                 section_counts[i, j] = max_iterations
                 continue
 
-            # --- Unrolled complex iteration ---
-            # Avoid complex object creation; use separate real/imag variables
+            # --- Unrolled complex iteration with Brent cycle detection ---
+            # Avoid complex object creation; use separate real/imag variables.
+            # Interior points converge to an attracting cycle, so they would
+            # otherwise run to max_iterations.  Detecting the cycle early and
+            # returning max_iterations produces the same pixel value while
+            # saving the bulk of the work at high iteration counts.
             zr = 0.0
             zi = 0.0
             count = 0
+            tortoise_r = 0.0
+            tortoise_i = 0.0
+            power = 1
+            lam = 0
 
             while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
                 # z = z^2 + c
@@ -103,6 +112,16 @@ def mandelbrot_section_jit(
                 zr = new_r
                 zi = new_i
                 count += 1
+
+                if (zr - tortoise_r) ** 2 + (zi - tortoise_i) ** 2 < 1e-24:
+                    count = max_iterations
+                    break
+                lam += 1
+                if lam == power:
+                    tortoise_r = zr
+                    tortoise_i = zi
+                    power *= 2
+                    lam = 0
 
             section_counts[i, j] = count
     return section_counts
@@ -123,7 +142,9 @@ def julia_section_jit(
 ):
     """
     Calculate Julia set iterations for a section of the image using
-    Numba JIT compilation with optimizations.
+    Numba JIT compilation with optimizations:
+    - Unrolled complex arithmetic
+    - Brent cycle detection for points in the filled Julia set
 
     Args:
         section_offset (int): First global column of this section
@@ -159,10 +180,16 @@ def julia_section_jit(
             x = x_min + global_x * x_range * width_inv
             y = y_min + i * y_range * height_inv
 
-            # Unrolled complex iteration: z = z^2 + c
+            # Unrolled complex iteration: z = z^2 + c, with Brent cycle
+            # detection.  Points in the filled Julia set converge to an
+            # attracting cycle; return max_iterations early (same colour).
             zr = x
             zi = y
             count = 0
+            tortoise_r = zr
+            tortoise_i = zi
+            power = 1
+            lam = 0
 
             while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
                 new_r = zr * zr - zi * zi + cr
@@ -170,6 +197,16 @@ def julia_section_jit(
                 zr = new_r
                 zi = new_i
                 count += 1
+
+                if (zr - tortoise_r) ** 2 + (zi - tortoise_i) ** 2 < 1e-24:
+                    count = max_iterations
+                    break
+                lam += 1
+                if lam == power:
+                    tortoise_r = zr
+                    tortoise_i = zi
+                    power *= 2
+                    lam = 0
 
             section_counts[i, j] = count
     return section_counts
@@ -393,6 +430,8 @@ class MandelbrotCalculator:
             y_max,
             max_iterations,
         )
+        if theme is None:
+            return iterations
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 
@@ -425,6 +464,8 @@ class MandelbrotCalculator:
             max_iterations,
             c,
         )
+        if theme is None:
+            return iterations
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
 
@@ -455,5 +496,7 @@ class MandelbrotCalculator:
             y_max,
             max_iterations,
         )
+        if theme is None:
+            return iterations
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
