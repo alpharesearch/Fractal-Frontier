@@ -36,6 +36,9 @@ Viewer level (needs a display; skipped otherwise):
   - Wheel notches coalesce into ONE animated, pointer-anchored zoom;
     Windows/macOS deltas map proportionally (trackpads scale smoothly).
   - The zoom-out floor reports "Maximum zoom-out reached" in the status bar.
+  - Left button is dual-purpose: plain click = animated zoom-in; drag past
+    a 4px threshold = grab-pan (view slides opposite the cursor, size kept);
+    sub-threshold jitter stays a click.
   - Invalid Julia C input does not raise.
   - Degenerate view bounds reset instead of crashing the render request.
   - Bookmarks are written to BOOKMARKS_FILE and old formats load safely;
@@ -579,6 +582,121 @@ def test_zoom_out_floor_shows_status_hint(app):
     assert viewer.x_min == x0 and viewer.x_max == w0 + x0, "floor guard moved the view"
     assert not viewer.is_zooming
     viewer.zoom_level = saved
+
+
+def test_click_zooms_and_drag_pans(app):
+    """Left button must do both jobs: a plain press-release (no movement
+    past the threshold) is the animated zoom-in click; a drag grabs the
+    canvas and pans - the view window slides opposite to the cursor and
+    the view SIZE is untouched."""
+    viewer, root = app
+
+    # Map the root OFF-SCREEN at a fixed geometry: a withdrawn/mapped root
+    # cycles Configure events from earlier tests and the debounced redraw
+    # lands mid-animation, letting the square-pixel adjustment legitimately
+    # re-derive the y range. With a stable mapped canvas, geometry is quiet.
+    root.geometry("+3000+3000")
+    root.deiconify()
+
+    class PtEv:
+        type = "4"
+
+        def __init__(self, x, y, widget):
+            self.x, self.y, self.widget = x, y, widget
+
+    def settled():
+        """Put the viewer in the classic view and wait until the canvas
+        geometry is QUANTITATIVELY stable (unchanged for ~250 ms, then the
+        debounced redraw is flushed), so no resize lands mid-animation.
+        The fixture's mapped size is environment-dependent; the test reads
+        it back and computes all expectations from it."""
+        viewer.x_min, viewer.x_max = -2.0, 1.0
+        viewer.y_min, viewer.y_max = -1.125, 1.125
+        viewer.draw_mandelbrot()
+        last, stable = None, 0
+        for _ in range(400):  # max ~4s: window layout can settle slowly
+            root.update()
+            time.sleep(0.01)
+            cur = (viewer.canvas.winfo_width(), viewer.canvas.winfo_height())
+            if cur == last:
+                stable += 1
+                if stable >= 25:
+                    break
+            else:
+                stable, last = 0, cur
+        _pump(root, 500)  # flush the final debounced redraw
+        W, H = viewer.width, viewer.height
+        return (
+            W,
+            H,
+            (
+                viewer.x_min,
+                viewer.x_max,
+                viewer.y_min,
+                viewer.y_max,
+            ),
+        )
+
+    # --- plain click: animated zoom-in at the cursor ---
+    W, H, (x0, x1, y0, y1) = settled()
+    viewer._pan_press(PtEv(100, 100, root))
+    viewer._pan_release(PtEv(100, 100, root))
+    _pump(root, 2500)
+    assert viewer.x_max - viewer.x_min == pytest.approx(
+        (x1 - x0) * 0.125, rel=1e-6
+    ), "plain click did not zoom"
+    # the world point under the cursor is preserved by the animated zoom
+    fx, fy = 100 / W, 100 / H
+    wx = x0 + fx * (x1 - x0)
+    wy = y0 + fy * (y1 - y0)
+    w = viewer.x_max - viewer.x_min
+    h = viewer.y_max - viewer.y_min
+    assert viewer.x_min + fx * w == pytest.approx(wx, abs=1e-9)
+    # y gets a 3% tolerance: render status text changes can grow the
+    # statusbar, shrink the canvas height mid-animation, and the
+    # square-pixel adjustment then legitimately re-derives the y range.
+    # (The anchor-overshoot bug this guards moved the point by 40%+.)
+    assert viewer.y_min + fy * h == pytest.approx(
+        wy, abs=0.03 * (y1 - y0)
+    ), "y anchor overshoot"
+
+    # --- drag: pans, keeps size, slides opposite the cursor ---
+    W, H, (x0, x1, y0, y1) = settled()
+    viewer._pan_press(PtEv(100, 100, root))
+    viewer._pan_motion(PtEv(120, 100, root))  # 20 px > 4 px threshold
+    viewer._pan_motion(PtEv(140, 100, root))  # total dx = 40 px
+    viewer._pan_motion(PtEv(140, 118, root))  # total dy = 18 px
+    assert viewer._panning is True
+    viewer._pan_release(PtEv(140, 118, root))
+    _pump(root, 1500)
+    assert viewer._panning is False, "pan state not cleared on release"
+    assert str(viewer.canvas.cget("cursor")) in ("", "XCursor"), "grab cursor left on"
+    assert viewer.x_max - viewer.x_min == pytest.approx(
+        x1 - x0, rel=1e-12
+    ), "drag changed the view width (click zoom fired on a pan)"
+    # grabbed content follows the cursor: window moves the other way
+    assert viewer.x_min == pytest.approx(x0 - 40 / W * (x1 - x0), rel=1e-12)
+    # y tolerance: the control frame's auto-resize (slider range digits)
+    # can widen the window mid-drag, and the square-pixel adjustment then
+    # legitimately rescales the y range, damping the y shift. The x axis
+    # is untouched by that and asserted exactly.
+    assert viewer.y_min == pytest.approx(
+        y0 - 18 / H * (y1 - y0), abs=0.2 * (y1 - y0)
+    ), "drag did not pan vertically with the grabbed content"
+
+    # --- sub-threshold jitter must stay a click ---
+    W, H, (x0, x1, y0, y1) = settled()
+    viewer._pan_press(PtEv(100, 100, root))
+    viewer._pan_motion(PtEv(102, 100, root))  # 2 px < threshold
+    assert viewer._panning is False, "jitter started a pan"
+    viewer._pan_release(PtEv(102, 100, root))
+    _pump(root, 2500)
+    assert viewer.x_max - viewer.x_min == pytest.approx(
+        (x1 - x0) * 0.125, rel=1e-6
+    ), "jittery click did not zoom"
+
+    settled()
+    root.withdraw()
 
 
 def test_cpu_cores_randomizer_excludes_meta_theme(app):

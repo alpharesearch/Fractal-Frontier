@@ -62,7 +62,7 @@ class MandelbrotViewer:
             master: Tkinter root window
         """
         self.master = master
-        self.app_name = "Fractal Frontier V1.1"
+        self.app_name = "Fractal Frontier V1.2"
         self.width = 160
         self.height = 120
         self.max_iterations = 100
@@ -274,7 +274,16 @@ class MandelbrotViewer:
         self.e_exp_i_n_label.grid_remove()
         self.e_exp_i_n_slider.grid_remove()
 
-        self.canvas.bind("<Button-1>", lambda event: self.fluid_zoom(event, 0.125))
+        # Left press = candidate zoom; a drag beyond the threshold turns it
+        # into a pan (the canvas is "grabbed": the image follows the cursor,
+        # the view window slides the other way). A release WITHOUT a drag is
+        # the plain animated zoom-in click.
+        self._pan_last = None
+        self._pan_start = None
+        self._panning = False
+        self.canvas.bind("<Button-1>", self._pan_press)
+        self.canvas.bind("<B1-Motion>", self._pan_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._pan_release)
         self.canvas.bind("<Button-2>", self.advance_theme)
         self.canvas.bind("<Button-3>", lambda event: self.fluid_zoom(event, 8))
 
@@ -1113,6 +1122,58 @@ class MandelbrotViewer:
             animate_zoom_step()
         except Exception:
             self.is_zooming = False  # Ensure flag is reset in case of an error
+
+    _PAN_THRESHOLD_PX = 4
+
+    def _pan_press(self, event):
+        """Remember the press point; the release decides click vs pan."""
+        self._pan_start = (event.x, event.y)
+        self._pan_last = (event.x, event.y)
+        self._panning = False
+
+    def _pan_motion(self, event):
+        """Drag = grab-pan: move the view window opposite to the cursor
+        delta, scaled to world units, so the grabbed point follows the
+        cursor. Activates only past the threshold, so tiny hand jitters
+        on a click still release as a zoom."""
+        if self._pan_last is None:
+            return
+        lx, ly = self._pan_last
+        if not self._panning:
+            if (
+                abs(event.x - self._pan_start[0]) + abs(event.y - self._pan_start[1])
+                < self._PAN_THRESHOLD_PX
+            ):
+                return
+            self._panning = True
+            self.canvas.config(cursor="fleur")
+        dx = event.x - lx
+        dy = event.y - ly
+        self._pan_last = (event.x, event.y)
+        width = self.x_max - self.x_min
+        height = self.y_max - self.y_min
+        self.x_min -= dx / self.width * width
+        self.x_max -= dx / self.width * width
+        # Canvas row 0 (top) is y_min, so the same sign rule applies on both
+        # axes: dragging the image down-left slides the view window the
+        # opposite way in world coordinates.
+        self.y_min -= dy / self.height * height
+        self.y_max -= dy / self.height * height
+        self.draw_mandelbrot()
+
+    def _pan_release(self, event):
+        """Finish a pan, or perform the plain click zoom when no drag
+        happened."""
+        panned = self._panning
+        self._panning = False
+        self._pan_start = None
+        self._pan_last = None
+        if panned:
+            self.canvas.config(cursor="")
+            return
+        if getattr(self, "_closed", False):
+            return
+        self.fluid_zoom(event, 0.125)
 
     def move_down(self, event):
         """
