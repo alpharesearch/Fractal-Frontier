@@ -8,10 +8,10 @@ that run on the GPU for 10-100x speedup over CPU-only approaches.
 import numpy as np
 from numba import cuda
 
-
 # --------------------------------------------------------------------------
 # CUDA KERNELS - Run on GPU
 # --------------------------------------------------------------------------
+
 
 @cuda.jit
 def mandelbrot_kernel(
@@ -26,44 +26,44 @@ def mandelbrot_kernel(
 ):
     """
     CUDA kernel to calculate the Mandelbrot set for all pixels in parallel.
-    
+
     Each thread computes one pixel.
     """
     # Calculate thread position in the grid
     x = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
     y = cuda.threadIdx.y + cuda.blockIdx.y * cuda.blockDim.y
-    
+
     if x >= width or y >= height:
         return
-    
+
     # Map pixel coordinates to complex plane
     cx = x_min + x * (x_max - x_min) / width
     cy = y_min + y * (y_max - y_min) / height
-    
+
     # Periodicity checking - skip if inside main cardioid
     q = (cx - 0.25) * (cx - 0.25) + cy * cy
     if q * (q + (cx - 0.25)) < 0.25 * cy * cy:
         result[y, x] = max_iterations
         return
-    
+
     # Period-2 bulb check: the period-2 component is the disk |c+1| < 1/4,
     # i.e. (cx+1)^2 + cy^2 < 0.0625 (a radius of 0.5 was twice too big).
     if (cx + 1.0) * (cx + 1.0) + cy * cy < 0.0625:
         result[y, x] = max_iterations
         return
-    
+
     # Iteration with unrolled complex arithmetic
     zr = 0.0
     zi = 0.0
     count = 0
-    
+
     while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
         new_r = zr * zr - zi * zi + cx
         new_i = 2.0 * zr * zi + cy
         zr = new_r
         zi = new_i
         count += 1
-    
+
     result[y, x] = count
 
 
@@ -82,30 +82,30 @@ def julia_kernel(
 ):
     """
     CUDA kernel to calculate the Julia set for all pixels in parallel.
-    
+
     Each thread computes one pixel.
     """
     x = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
     y = cuda.threadIdx.y + cuda.blockIdx.y * cuda.blockDim.y
-    
+
     if x >= width or y >= height:
         return
-    
+
     cx = x_min + x * (x_max - x_min) / width
     cy = y_min + y * (y_max - y_min) / height
-    
+
     # Iteration: z = z^2 + c (Julia set)
     zr = cx
     zi = cy
     count = 0
-    
+
     while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
         new_r = zr * zr - zi * zi + cr
         new_i = 2.0 * zr * zi + ci
         zr = new_r
         zi = new_i
         count += 1
-    
+
     result[y, x] = count
 
 
@@ -122,22 +122,22 @@ def fatou_kernel(
 ):
     """
     CUDA kernel to calculate the Fatou set for all pixels in parallel.
-    
+
     Each thread computes one pixel using Newton's method for z^3 - 1 = 0.
     """
     x = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
     y = cuda.threadIdx.y + cuda.blockIdx.y * cuda.blockDim.y
-    
+
     if x >= width or y >= height:
         return
-    
+
     cx = x_min + x * (x_max - x_min) / width
     cy = y_min + y * (y_max - y_min) / height
-    
+
     zr = cx
     zi = cy
     count = 0
-    
+
     while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
         # z^2
         sr = zr * zr - zi * zi
@@ -161,7 +161,7 @@ def fatou_kernel(
         zr = zr - div_r
         zi = zi - div_i
         count += 1
-    
+
     result[y, x] = count
 
 
@@ -169,11 +169,12 @@ def fatou_kernel(
 # GPU CALCULATOR CLASS
 # --------------------------------------------------------------------------
 
+
 class GPUCalculator:
     """
     Class for calculating fractal sets using GPU acceleration.
     """
-    
+
     def __init__(self):
         """Initialize the GPU calculator."""
         self.device = cuda.get_current_device()
@@ -185,8 +186,10 @@ class GPUCalculator:
         except AttributeError:
             # Newer Numba versions may not expose this attribute
             pass
-    
-    def calculate_mandelbrot_gpu(self, width, height, x_min, x_max, y_min, y_max, max_iterations):
+
+    def calculate_mandelbrot_gpu(
+        self, width, height, x_min, x_max, y_min, y_max, max_iterations
+    ):
         """
         Calculate Mandelbrot set using GPU.
         """
@@ -214,8 +217,10 @@ class GPUCalculator:
 
         d_result.copy_to_host(h_result)
         return h_result
-    
-    def calculate_julia_gpu(self, width, height, x_min, x_max, y_min, y_max, max_iterations, c):
+
+    def calculate_julia_gpu(
+        self, width, height, x_min, x_max, y_min, y_max, max_iterations, c
+    ):
         """
         Calculate Julia set using GPU.
         """
@@ -245,8 +250,10 @@ class GPUCalculator:
 
         d_result.copy_to_host(h_result)
         return h_result
-    
-    def calculate_fatou_gpu(self, width, height, x_min, x_max, y_min, y_max, max_iterations):
+
+    def calculate_fatou_gpu(
+        self, width, height, x_min, x_max, y_min, y_max, max_iterations
+    ):
         """
         Calculate Fatou set using GPU.
         """

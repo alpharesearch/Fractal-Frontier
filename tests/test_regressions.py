@@ -59,10 +59,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 from fractals import GPU_AVAILABLE, MandelbrotCalculator  # noqa: E402
 from themes import apply_color_theme  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Calculator / theme level
 # ---------------------------------------------------------------------------
+
 
 def test_gpu_available_reflects_real_device():
     """GPU_AVAILABLE must mean 'a CUDA device exists', not 'numba-cuda imports'."""
@@ -117,9 +117,9 @@ def test_high_res_rainbow_palettes_not_collapsed():
     ):
         colors = apply_color_theme(iterations, 100000, theme)
         distinct = len(np.unique(colors.reshape(-1, 3), axis=0))
-        assert distinct >= min_distinct, (
-            f"{theme}: only {distinct} distinct colors (palette collapsed?)"
-        )
+        assert (
+            distinct >= min_distinct
+        ), f"{theme}: only {distinct} distinct colors (palette collapsed?)"
 
 
 def test_sectioned_render_matches_full_width():
@@ -145,15 +145,22 @@ def test_sectioned_render_matches_full_width():
         for i in range(num_sections):
             parts.append(
                 mandelbrot_section_jit(
-                    offset, section_widths[i], width, height,
-                    x_min, x_max, y_min, y_max, mi,
+                    offset,
+                    section_widths[i],
+                    width,
+                    height,
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
+                    mi,
                 )
             )
             offset += section_widths[i]
         sectioned = np.hstack(parts)
-        assert sectioned.shape == full.shape, (
-            f"{num_sections} sections: shape {sectioned.shape} != {full.shape}"
-        )
+        assert (
+            sectioned.shape == full.shape
+        ), f"{num_sections} sections: shape {sectioned.shape} != {full.shape}"
         mismatch = (sectioned != full).sum()
         assert mismatch == 0, (
             f"{num_sections} sections: {mismatch} pixels differ from the "
@@ -173,8 +180,12 @@ def test_auto_iterations_scale_with_zoom():
     # Bare instance: the method does not use any instance state.
     viewer = object.__new__(MandelbrotViewer)
 
-    assert f(viewer, 1.0) >= 256, "classic view needs enough iterations to resolve the neck"
-    assert f(viewer, 100.0) > f(viewer, 10.0) > f(viewer, 1.0), "must grow with zoom depth"
+    assert (
+        f(viewer, 1.0) >= 256
+    ), "classic view needs enough iterations to resolve the neck"
+    assert (
+        f(viewer, 100.0) > f(viewer, 10.0) > f(viewer, 1.0)
+    ), "must grow with zoom depth"
     assert f(viewer, 1e6) == 8192, "ceiling not respected"
     assert f(viewer, 0.26) >= 32, "floor not respected at extreme zoom-out"
 
@@ -188,7 +199,14 @@ def test_julia_zero_constant_is_respected():
     try:
         MandelbrotCalculator.set_use_gpu(False)
         common = (
-            "julia", 32, 24, -2.0, 2.0, -2.0, 2.0, 40,
+            "julia",
+            32,
+            24,
+            -2.0,
+            2.0,
+            -2.0,
+            2.0,
+            40,
         )
         zero = calc._compute_iterations(*common, complex(0, 0))
         default = calc._compute_iterations(*common, complex(-0.7, 0.27015))
@@ -198,9 +216,9 @@ def test_julia_zero_constant_is_respected():
         assert zero[12, 16] == 40, "z=0 must not escape with c=0j"
         assert zero[0, 0] == 0, "z=-2-2j escapes at once with c=0j"
         # It must be the 0j set, not the default rabbit set.
-        assert not np.array_equal(zero, default), (
-            "c=0j was replaced by the default Julia constant"
-        )
+        assert not np.array_equal(
+            zero, default
+        ), "c=0j was replaced by the default Julia constant"
         assert np.array_equal(none, default), "c=None must use the default"
     finally:
         MandelbrotCalculator.set_use_gpu(original)
@@ -209,6 +227,7 @@ def test_julia_zero_constant_is_respected():
 # ---------------------------------------------------------------------------
 # Viewer level (requires a display)
 # ---------------------------------------------------------------------------
+
 
 def _pump(root, ms):
     """Run the Tk event loop for roughly `ms` milliseconds."""
@@ -269,9 +288,9 @@ def test_pixels_stay_square_after_resize(app):
         viewer.width, viewer.height = w, h
         x_range_before = viewer.x_max - viewer.x_min
         viewer.draw_mandelbrot()
-        assert abs((viewer.x_max - viewer.x_min) - x_range_before) < 1e-9, (
-            "x range must be preserved by the aspect adjustment"
-        )
+        assert (
+            abs((viewer.x_max - viewer.x_min) - x_range_before) < 1e-9
+        ), "x range must be preserved by the aspect adjustment"
         dx = (viewer.x_max - viewer.x_min) / w
         dy = (viewer.y_max - viewer.y_min) / h
         assert abs(dx - dy) / dx < 1e-9, f"pixels not square at {w}x{h}"
@@ -310,7 +329,7 @@ def test_negative_offset_clamps_max_iterations(app):
     viewer, root = app
     saved = viewer.iteration_offset
     try:
-        viewer.iteration_offset = -10**6
+        viewer.iteration_offset = -(10**6)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             viewer.draw_mandelbrot()
@@ -448,12 +467,12 @@ def test_pan_preserves_view_size(app):
     for _ in range(10):
         viewer.move_right(ev)
         viewer.move_up(ev)
-    assert viewer.x_max - viewer.x_min == pytest.approx(w0, rel=1e-12), (
-        "horizontal pan changed the view width (1%-shrink bug)"
-    )
-    assert viewer.y_max - viewer.y_min == pytest.approx(h0, rel=1e-12), (
-        "vertical pan changed the view height (1%-shrink bug)"
-    )
+    assert viewer.x_max - viewer.x_min == pytest.approx(
+        w0, rel=1e-12
+    ), "horizontal pan changed the view width (1%-shrink bug)"
+    assert viewer.y_max - viewer.y_min == pytest.approx(
+        h0, rel=1e-12
+    ), "vertical pan changed the view height (1%-shrink bug)"
     # The pans must have actually moved the view.
     assert viewer.x_max > 1.0 and viewer.y_max < 1.5
 
@@ -467,12 +486,10 @@ def test_cpu_cores_randomizer_excludes_meta_theme(app):
     from the full themes list could select "CPU Cores" itself; it has no
     theme function and silently rendered that section as "Default"."""
     viewer, _ = app
-    assert viewer.CPU_CORES_THEME not in viewer._theme_choices, (
-        "CPU Cores randomizer pool contains the meta-theme"
-    )
-    assert set(viewer._theme_choices) == set(viewer.themes) - {
-        viewer.CPU_CORES_THEME
-    }
+    assert (
+        viewer.CPU_CORES_THEME not in viewer._theme_choices
+    ), "CPU Cores randomizer pool contains the meta-theme"
+    assert set(viewer._theme_choices) == set(viewer.themes) - {viewer.CPU_CORES_THEME}
 
 
 def test_pool_is_capped_at_section_limit(app):

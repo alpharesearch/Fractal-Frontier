@@ -3,7 +3,8 @@
 import numpy as np
 import pytest
 
-from fractals import GPU_AVAILABLE, MandelbrotCalculator, mandelbrot_section_jit
+from fractals import (GPU_AVAILABLE, MandelbrotCalculator,
+                      mandelbrot_section_jit)
 
 
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="GPU not available")
@@ -31,20 +32,30 @@ class TestGPUCalculator:
         self.calculator.set_use_gpu(True)
         result = self.calculator.calculate_full(
             "mandelbrot",
-            self.width, self.height,
-            self.x_min, self.x_max, self.y_min, self.y_max,
-            self.max_iterations, "Default"
+            self.width,
+            self.height,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
+            "Default",
         )
         assert result.shape == (self.height, self.width, 3)  # RGB
 
     def test_mandelbrot_gpu_values_in_range(self):
         """GPU Mandelbrot iteration counts should be in valid range."""
         from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         iterations = gpu.calculate_mandelbrot_gpu(
-            self.width, self.height,
-            self.x_min, self.x_max, self.y_min, self.y_max,
-            self.max_iterations
+            self.width,
+            self.height,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
         )
         assert iterations.min() >= 0
         assert iterations.max() <= self.max_iterations
@@ -52,16 +63,27 @@ class TestGPUCalculator:
     def test_mandelbrot_gpu_matches_cpu(self):
         """GPU and CPU Mandelbrot should produce nearly identical results."""
         from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         gpu_result = gpu.calculate_mandelbrot_gpu(
-            self.width, self.height,
-            self.x_min, self.x_max, self.y_min, self.y_max,
-            self.max_iterations
+            self.width,
+            self.height,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
         )
         cpu_result = mandelbrot_section_jit(
-            0, self.width, self.width, self.height,
-            self.x_min, self.x_max, self.y_min, self.y_max,
-            self.max_iterations
+            0,
+            self.width,
+            self.width,
+            self.height,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
         )
         # Allow small differences due to floating-point boundary cases
         diff = gpu_result != cpu_result
@@ -74,41 +96,51 @@ class TestGPUCalculator:
         julia_c = complex(-0.7, 0.27015)
         result = self.calculator.calculate_full(
             "julia",
-            self.width, self.height,
-            -1.5, 1.5, -1.5, 1.5,
-            self.max_iterations, "Default",
-            c=julia_c
+            self.width,
+            self.height,
+            -1.5,
+            1.5,
+            -1.5,
+            1.5,
+            self.max_iterations,
+            "Default",
+            c=julia_c,
         )
         assert result.shape == (self.height, self.width, 3)
 
     def test_julia_gpu_values_in_range(self):
         """GPU Julia iteration counts should be in valid range."""
         from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         julia_c = complex(-0.7, 0.27015)
         iterations = gpu.calculate_julia_gpu(
-            self.width, self.height,
-            -1.5, 1.5, -1.5, 1.5,
-            self.max_iterations, julia_c
+            self.width, self.height, -1.5, 1.5, -1.5, 1.5, self.max_iterations, julia_c
         )
         assert iterations.min() >= 0
         assert iterations.max() <= self.max_iterations
 
     def test_julia_gpu_matches_cpu(self):
         """GPU and CPU Julia should produce nearly identical results."""
-        from gpu_fractals import GPUCalculator
         from fractals import julia_section_jit
+        from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         julia_c = complex(-0.7, 0.27015)
         gpu_result = gpu.calculate_julia_gpu(
-            self.width, self.height,
-            -1.5, 1.5, -1.5, 1.5,
-            self.max_iterations, julia_c
+            self.width, self.height, -1.5, 1.5, -1.5, 1.5, self.max_iterations, julia_c
         )
         cpu_result = julia_section_jit(
-            0, self.width, self.width, self.height,
-            -1.5, 1.5, -1.5, 1.5,
-            self.max_iterations, julia_c
+            0,
+            self.width,
+            self.width,
+            self.height,
+            -1.5,
+            1.5,
+            -1.5,
+            1.5,
+            self.max_iterations,
+            julia_c,
         )
         diff = gpu_result != cpu_result
         diff_pct = np.sum(diff) / gpu_result.size
@@ -119,38 +151,47 @@ class TestGPUCalculator:
         self.calculator.set_use_gpu(True)
         result = self.calculator.calculate_full(
             "fatou",
-            self.width, self.height,
-            -2.0, 2.0, -2.0, 2.0,
-            self.max_iterations, "Default"
+            self.width,
+            self.height,
+            -2.0,
+            2.0,
+            -2.0,
+            2.0,
+            self.max_iterations,
+            "Default",
         )
         assert result.shape == (self.height, self.width, 3)
 
     def test_fatou_gpu_values_in_range(self):
         """GPU Fatou iteration counts should be in valid range."""
         from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         iterations = gpu.calculate_fatou_gpu(
-            self.width, self.height,
-            -2.0, 2.0, -2.0, 2.0,
-            self.max_iterations
+            self.width, self.height, -2.0, 2.0, -2.0, 2.0, self.max_iterations
         )
         assert iterations.min() >= 0
         assert iterations.max() <= self.max_iterations
 
     def test_fatou_gpu_matches_cpu(self):
         """GPU and CPU Fatou should produce nearly identical results."""
-        from gpu_fractals import GPUCalculator
         from fractals import fatou_section_jit
+        from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         gpu_result = gpu.calculate_fatou_gpu(
-            self.width, self.height,
-            -2.0, 2.0, -2.0, 2.0,
-            self.max_iterations
+            self.width, self.height, -2.0, 2.0, -2.0, 2.0, self.max_iterations
         )
         cpu_result = fatou_section_jit(
-            0, self.width, self.width, self.height,
-            -2.0, 2.0, -2.0, 2.0,
-            self.max_iterations
+            0,
+            self.width,
+            self.width,
+            self.height,
+            -2.0,
+            2.0,
+            -2.0,
+            2.0,
+            self.max_iterations,
         )
         diff = gpu_result != cpu_result
         diff_pct = np.sum(diff) / gpu_result.size
@@ -162,18 +203,28 @@ class TestGPUCalculator:
         self.calculator.set_use_gpu(True)
         gpu_result = self.calculator.calculate_full(
             "mandelbrot",
-            self.width, self.height,
-            self.x_min, self.x_max, self.y_min, self.y_max,
-            self.max_iterations, "Default"
+            self.width,
+            self.height,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
+            "Default",
         )
 
         # CPU mode
         self.calculator.set_use_gpu(False)
         cpu_result = self.calculator.calculate_full(
             "mandelbrot",
-            self.width, self.height,
-            self.x_min, self.x_max, self.y_min, self.y_max,
-            self.max_iterations, "Default"
+            self.width,
+            self.height,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
+            "Default",
         )
 
         # Both should produce valid RGB arrays
@@ -185,17 +236,23 @@ class TestGPUCalculator:
     def test_higher_resolution(self):
         """GPU should handle higher resolutions correctly."""
         from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         result = gpu.calculate_mandelbrot_gpu(
-            800, 600,
-            self.x_min, self.x_max, self.y_min, self.y_max,
-            self.max_iterations
+            800,
+            600,
+            self.x_min,
+            self.x_max,
+            self.y_min,
+            self.y_max,
+            self.max_iterations,
         )
         assert result.shape == (600, 800)
 
     def test_zoomed_view(self):
         """GPU should produce correct results for zoomed-in views."""
         from gpu_fractals import GPUCalculator
+
         gpu = GPUCalculator()
         # Region on the Mandelbrot boundary (not inside cardioid/bulb)
         zoom_x_min = -1.0
@@ -204,9 +261,7 @@ class TestGPUCalculator:
         zoom_y_max = 0.7
 
         gpu_result = gpu.calculate_mandelbrot_gpu(
-            self.width, self.height,
-            zoom_x_min, zoom_x_max, zoom_y_min, zoom_y_max,
-            500
+            self.width, self.height, zoom_x_min, zoom_x_max, zoom_y_min, zoom_y_max, 500
         )
         assert gpu_result.shape == (self.height, self.width)
         # Should have variation in iteration counts (boundary region)
@@ -225,6 +280,7 @@ class TestGPUCalculator:
         the GPU's thousands of threads dominate.
         """
         import time
+
         from gpu_fractals import GPUCalculator
 
         gpu = GPUCalculator()
@@ -252,7 +308,9 @@ class TestGPUCalculator:
         cpu_time = (time.perf_counter() - t0) / 20
 
         speedup = cpu_time / gpu_time
-        print(f"\nGPU: {gpu_time*1000:.1f}ms | CPU: {cpu_time*1000:.1f}ms | Speedup: {speedup:.1f}x")
+        print(
+            f"\nGPU: {gpu_time*1000:.1f}ms | CPU: {cpu_time*1000:.1f}ms | Speedup: {speedup:.1f}x"
+        )
         # GPU is faster but transfer overhead limits speedup for single-frame benchmarks
         assert speedup > 2.0, f"GPU should be at least 2x faster, got {speedup:.1f}x"
 
@@ -270,6 +328,7 @@ class TestGPUNotAvailable:
         calc = MandelbrotCalculator()
         import io
         import sys
+
         captured = io.StringIO()
         sys.stdout = captured
         calc.set_use_gpu(True)

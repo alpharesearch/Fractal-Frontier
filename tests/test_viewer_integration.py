@@ -1,5 +1,7 @@
 import tkinter as tk
+
 import pytest
+
 from Fractal_Frontier import MandelbrotViewer
 
 
@@ -22,14 +24,16 @@ def test_zoom_persists_view_bounds_and_redraws():
 
     # Simulate a wheel event at the canvas centre
     class Event:
-        type = "4"          # mouse button/wheel press in Tkinter (string!)
+        type = "4"  # mouse button/wheel press in Tkinter (string!)
         x = viewer.width // 2
         y = viewer.height // 2
 
     from unittest.mock import patch
 
     # Perform zoom‑in (factor < 1) with mocked draw_mandelbrot to set image
-    with patch.object(viewer, 'draw_mandelbrot', new=lambda: setattr(viewer.canvas, 'image', object())):
+    with patch.object(
+        viewer, "draw_mandelbrot", new=lambda: setattr(viewer.canvas, "image", object())
+    ):
         viewer.zoom(Event(), zoom_factor=0.5)
 
     # After zoom, the overall width and height should decrease

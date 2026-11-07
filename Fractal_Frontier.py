@@ -20,7 +20,7 @@ from tkinter import messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-from fractals import MandelbrotCalculator, GPU_AVAILABLE
+from fractals import GPU_AVAILABLE, MandelbrotCalculator
 from themes import apply_color_theme
 
 # Bookmarks live next to the script (not in whatever CWD the app was
@@ -66,7 +66,7 @@ class MandelbrotViewer:
         self.julia_c = complex(-0.7, 0.27015)
 
         self.auto_adjust = True
-        
+
         # GPU mode - enabled by default if available
         self.use_gpu = GPU_AVAILABLE
 
@@ -145,7 +145,7 @@ class MandelbrotViewer:
             command=self.toggle_auto_adjust,
         )
         self.auto_adjust_checkbox.grid(row=1, column=0, padx=5, pady=5)
-        
+
         # GPU toggle checkbox
         if GPU_AVAILABLE:
             self.gpu_var = tk.BooleanVar(value=self.use_gpu)
@@ -309,9 +309,7 @@ class MandelbrotViewer:
         self._render_seq = 0
         self._closed = False
         self._image_item = None
-        self._render_thread = threading.Thread(
-            target=self._render_worker, daemon=True
-        )
+        self._render_thread = threading.Thread(target=self._render_worker, daemon=True)
         self._render_thread.start()
         self._poll_results()
 
@@ -383,7 +381,8 @@ class MandelbrotViewer:
         self.draw_mandelbrot()
 
     def toggle_gpu(self):
-        """Toggle GPU acceleration on/off, ensuring CPU is used when GPU is off and vice versa."""
+        """Toggle GPU acceleration on/off, ensuring CPU is used when GPU
+        is off and vice versa."""
         self.use_gpu = self.gpu_var.get()
         if self.use_gpu:
             # GPU enabled — ensure calculator uses GPU
@@ -392,7 +391,9 @@ class MandelbrotViewer:
         else:
             # GPU disabled — explicitly force CPU mode on the calculator
             MandelbrotCalculator.set_use_gpu(False)
-            self.status_bar.config(text=f"Switched to CPU backend ({self.num_cores} cores)")
+            self.status_bar.config(
+                text=f"Switched to CPU backend ({self.num_cores} cores)"
+            )
         self.draw_mandelbrot()
 
     def _auto_iterations_for(self, zoom_level):
@@ -561,21 +562,35 @@ class MandelbrotViewer:
             # GPU mode: one kernel for the whole image (no multiprocessing).
             if not is_cpu_cores_theme:
                 return self.calculator.calculate_full(
-                    fractal_type.lower(), width, height,
-                    x_min, x_max, y_min, y_max,
-                    max_iterations, theme, c=julia_c,
+                    fractal_type.lower(),
+                    width,
+                    height,
+                    x_min,
+                    x_max,
+                    y_min,
+                    y_max,
+                    max_iterations,
+                    theme,
+                    c=julia_c,
                 )
             # "CPU Cores" theme on GPU: compute iterations once, then apply a
             # random theme per vertical section (mirrors the CPU behaviour).
             iterations = self.calculator.calculate_full(
-                fractal_type.lower(), width, height,
-                x_min, x_max, y_min, y_max,
-                max_iterations, None, c=julia_c,
+                fractal_type.lower(),
+                width,
+                height,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                max_iterations,
+                None,
+                c=julia_c,
             )
             pieces = []
             offset = 0
             for i in range(num_sections):
-                piece = iterations[:, offset:offset + section_widths[i]]
+                piece = iterations[:, offset : offset + section_widths[i]]
                 pieces.append(
                     apply_color_theme(
                         piece, max_iterations, random.choice(self._theme_choices)
@@ -593,13 +608,19 @@ class MandelbrotViewer:
         for i in range(num_sections):
             section_width = section_widths[i]
             task_theme = (
-                random.choice(self._theme_choices)
-                if is_cpu_cores_theme
-                else theme
+                random.choice(self._theme_choices) if is_cpu_cores_theme else theme
             )
             task = (
-                offset, section_width, width, height,
-                x_min, x_max, y_min, y_max, max_iterations, task_theme,
+                offset,
+                section_width,
+                width,
+                height,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                max_iterations,
+                task_theme,
             )
             if fractal_type == "Julia":
                 task = task + (julia_c,)
@@ -792,8 +813,10 @@ class MandelbrotViewer:
                 f"Auto Adj: {bm.get('auto_adjust', True)} | "
                 f"Iter_Offset: {bm.get('iteration_offset', 0)} | "
                 f"Auto Iter: {bm.get('auto_iterations', 0)} | "
-                f"X: {float(bm.get('x_min', -2.0)):.16g} to {float(bm.get('x_max', 1.0)):.16g} | "
-                f"Y: {float(bm.get('y_min', -1.5)):.16g} to {float(bm.get('y_max', 1.5)):.16g}"
+                f"X: {float(bm.get('x_min', -2.0)):.16g} "
+                f"to {float(bm.get('x_max', 1.0)):.16g} | "
+                f"Y: {float(bm.get('y_min', -1.5)):.16g} "
+                f"to {float(bm.get('y_max', 1.5)):.16g}"
             )
             lb.insert(tk.END, summary)
         lb.pack(fill=tk.BOTH, expand=True)
@@ -1182,9 +1205,7 @@ class MandelbrotViewer:
             real_part = float(self.julia_c_real_var.get())
             imag_part = float(self.julia_c_imag_var.get())
         except (TypeError, ValueError):
-            self.status_bar.config(
-                text="Invalid Julia C value – please enter numbers"
-            )
+            self.status_bar.config(text="Invalid Julia C value – please enter numbers")
             return None
         return complex(real_part, imag_part)
 

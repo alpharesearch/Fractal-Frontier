@@ -5,10 +5,10 @@ This module tests the viewer's zoom, pan, and bookmark functionality,
 as well as other GUI-related features that are not covered in test_calculator.py.
 """
 
+import json
 import os
 import sys
 import tempfile
-import json
 
 # Add the project root to Python path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
@@ -18,6 +18,7 @@ from Fractal_Frontier import MandelbrotViewer
 
 def test_zoom_calculation():
     """Test that zoom calculations work correctly."""
+
     # Create a mock event object
     class MockEvent:
         def __init__(self):
@@ -72,7 +73,7 @@ def test_zoom_calculation():
 def test_bookmark_saving_and_loading():
     """Test that bookmarks can be saved and loaded correctly."""
     # Create a temporary file for testing
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         temp_file = f.name
 
     try:
@@ -86,18 +87,18 @@ def test_bookmark_saving_and_loading():
                 "y_max": 1.0,
                 "max_iterations": 200,
                 "theme": "Blue",
-                "fractal_type": "Mandelbrot"
+                "fractal_type": "Mandelbrot",
             }
         ]
 
         # Save bookmark
-        with open(temp_file, 'w') as f:
+        with open(temp_file, "w") as f:
             json.dump(test_bookmarks, f)
 
         # Verify file was created and contains expected data
         assert os.path.exists(temp_file), "Bookmark file should be created"
 
-        with open(temp_file, 'r') as f:
+        with open(temp_file, "r") as f:
             bookmarks = json.load(f)
 
         # Check that our bookmark was saved correctly
@@ -111,22 +112,24 @@ def test_bookmark_saving_and_loading():
         assert bookmarks[0]["fractal_type"] == "Mandelbrot"
 
         # Add another bookmark
-        test_bookmarks.append({
-            "name": "Test Bookmark 2",
-            "x_min": -1.8,
-            "x_max": 0.8,
-            "y_min": -1.2,
-            "y_max": 1.2,
-            "max_iterations": 300,
-            "theme": "Fire",
-            "fractal_type": "Julia"
-        })
+        test_bookmarks.append(
+            {
+                "name": "Test Bookmark 2",
+                "x_min": -1.8,
+                "x_max": 0.8,
+                "y_min": -1.2,
+                "y_max": 1.2,
+                "max_iterations": 300,
+                "theme": "Fire",
+                "fractal_type": "Julia",
+            }
+        )
 
-        with open(temp_file, 'w') as f:
+        with open(temp_file, "w") as f:
             json.dump(test_bookmarks, f)
 
         # Verify second bookmark was added
-        with open(temp_file, 'r') as f:
+        with open(temp_file, "r") as f:
             bookmarks = json.load(f)
 
         assert len(bookmarks) == 2, "Two bookmarks should be saved"
@@ -151,7 +154,7 @@ def test_bookmark_data_structure():
             "y_max": 1.0,
             "max_iterations": 200,
             "theme": "Default",
-            "fractal_type": "Mandelbrot"
+            "fractal_type": "Mandelbrot",
         },
         {
             "name": "Julia Set",
@@ -161,7 +164,7 @@ def test_bookmark_data_structure():
             "y_max": 1.5,
             "max_iterations": 100,
             "theme": "Rainbow",
-            "fractal_type": "Julia"
+            "fractal_type": "Julia",
         },
         {
             "name": "Fatou Set",
@@ -171,19 +174,19 @@ def test_bookmark_data_structure():
             "y_max": 1.5,
             "max_iterations": 150,
             "theme": "Grayscale",
-            "fractal_type": "Fatou"
-        }
+            "fractal_type": "Fatou",
+        },
     ]
 
     # Save and load the bookmarks
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         temp_file = f.name
 
     try:
-        with open(temp_file, 'w') as f:
+        with open(temp_file, "w") as f:
             json.dump(test_cases, f)
 
-        with open(temp_file, 'r') as f:
+        with open(temp_file, "r") as f:
             loaded_bookmarks = json.load(f)
 
         # Verify all bookmarks were saved and loaded correctly
@@ -197,9 +200,13 @@ def test_bookmark_data_structure():
             assert loaded["x_max"] == original["x_max"], f"Bookmark {i} x_max mismatch"
             assert loaded["y_min"] == original["y_min"], f"Bookmark {i} y_min mismatch"
             assert loaded["y_max"] == original["y_max"], f"Bookmark {i} y_max mismatch"
-            assert loaded["max_iterations"] == original["max_iterations"], f"Bookmark {i} max_iterations mismatch"
+            assert (
+                loaded["max_iterations"] == original["max_iterations"]
+            ), f"Bookmark {i} max_iterations mismatch"
             assert loaded["theme"] == original["theme"], f"Bookmark {i} theme mismatch"
-            assert loaded["fractal_type"] == original["fractal_type"], f"Bookmark {i} fractal_type mismatch"
+            assert (
+                loaded["fractal_type"] == original["fractal_type"]
+            ), f"Bookmark {i} fractal_type mismatch"
 
     finally:
         if os.path.exists(temp_file):
@@ -236,15 +243,24 @@ def test_max_iterations_validation():
 
     for iterations in valid_iterations:
         assert iterations > 0, f"Max iterations {iterations} should be positive"
-        assert isinstance(iterations, int), f"Max iterations {iterations} should be an integer"
+        assert isinstance(
+            iterations, int
+        ), f"Max iterations {iterations} should be an integer"
 
 
 def test_theme_names():
     """Test that theme names are valid strings."""
     # Valid theme names from the application
     valid_themes = [
-        "Default", "Grayscale", "Blue", "Fire", "Rainbow",
-        "Rainbow2", "Rainbow3", "Rainbow4", "CPU Cores"
+        "Default",
+        "Grayscale",
+        "Blue",
+        "Fire",
+        "Rainbow",
+        "Rainbow2",
+        "Rainbow3",
+        "Rainbow4",
+        "CPU Cores",
     ]
 
     for theme in valid_themes:
@@ -258,5 +274,7 @@ def test_fractal_type_names():
     valid_types = ["Mandelbrot", "Julia", "Fatou"]
 
     for fractal_type in valid_types:
-        assert isinstance(fractal_type, str), f"Fractal type {fractal_type} should be a string"
+        assert isinstance(
+            fractal_type, str
+        ), f"Fractal type {fractal_type} should be a string"
         assert len(fractal_type) > 0, f"Fractal type {fractal_type} should not be empty"

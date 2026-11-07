@@ -8,8 +8,9 @@ from themes import apply_color_theme
 # the first kernel launch (or device query) raises CudaSupportError, which used
 # to crash the app at startup.
 try:
-    from gpu_fractals import GPUCalculator
     from numba import cuda as _numba_cuda
+
+    from gpu_fractals import GPUCalculator
 
     try:
         GPU_AVAILABLE = bool(_numba_cuda.is_available()) and len(_numba_cuda.gpus) > 0
@@ -57,28 +58,28 @@ def mandelbrot_section_jit(
         numpy.ndarray: 2D array of iteration counts for the section
     """
     section_counts = np.empty((height, section_width), dtype=np.int32)
-    
+
     # Precompute constants
     width_inv = 1.0 / width
     height_inv = 1.0 / height
     x_range = x_max - x_min
     y_range = y_max - y_min
-    
+
     for i in prange(height):
         for j in range(section_width):
             global_x = section_offset + j
-            
+
             # Map pixel coordinates to complex plane
             x = x_min + global_x * x_range * width_inv
             y = y_min + i * y_range * height_inv
-            
+
             # --- Periodicity checking ---
             # Main cardioid check: (x-0.25)² + y² < 0.0625
             q = (x - 0.25) * (x - 0.25) + y * y
             if q * (q + (x - 0.25)) < 0.25 * y * y:
                 section_counts[i, j] = max_iterations
                 continue
-            
+
             # Period-2 bulb check: the period-2 component is the disk
             # |c+1| < 1/4, i.e. (x+1)^2 + y^2 < 0.0625. (A radius of 0.5
             # painted a disk twice too big, swallowing the neck between the
@@ -86,13 +87,13 @@ def mandelbrot_section_jit(
             if (x + 1.0) * (x + 1.0) + y * y < 0.0625:
                 section_counts[i, j] = max_iterations
                 continue
-            
+
             # --- Unrolled complex iteration ---
             # Avoid complex object creation; use separate real/imag variables
             zr = 0.0
             zi = 0.0
             count = 0
-            
+
             while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
                 # z = z^2 + c
                 # New real: zr^2 - zi^2 + x
@@ -102,7 +103,7 @@ def mandelbrot_section_jit(
                 zr = new_r
                 zi = new_i
                 count += 1
-            
+
             section_counts[i, j] = count
     return section_counts
 
@@ -140,36 +141,36 @@ def julia_section_jit(
         numpy.ndarray: 2D array of iteration counts for the section
     """
     section_counts = np.empty((height, section_width), dtype=np.int32)
-    
+
     # Precompute constants
     width_inv = 1.0 / width
     height_inv = 1.0 / height
     x_range = x_max - x_min
     y_range = y_max - y_min
-    
+
     # Unpack c into real/imag to avoid complex ops
     cr = c.real
     ci = c.imag
-    
+
     for i in prange(height):
         for j in range(section_width):
             global_x = section_offset + j
-            
+
             x = x_min + global_x * x_range * width_inv
             y = y_min + i * y_range * height_inv
-            
+
             # Unrolled complex iteration: z = z^2 + c
             zr = x
             zi = y
             count = 0
-            
+
             while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
                 new_r = zr * zr - zi * zi + cr
                 new_i = 2.0 * zr * zi + ci
                 zr = new_r
                 zi = new_i
                 count += 1
-            
+
             section_counts[i, j] = count
     return section_counts
 
@@ -205,25 +206,25 @@ def fatou_section_jit(
         numpy.ndarray: 2D array of iteration counts for the section
     """
     section_counts = np.empty((height, section_width), dtype=np.int32)
-    
+
     # Precompute constants
     width_inv = 1.0 / width
     height_inv = 1.0 / height
     x_range = x_max - x_min
     y_range = y_max - y_min
-    
+
     for i in prange(height):
         for j in range(section_width):
             global_x = section_offset + j
-            
+
             x = x_min + global_x * x_range * width_inv
             y = y_min + i * y_range * height_inv
-            
+
             # Fatou set: Newton's method for z^3 - 1 = 0
             zr = x
             zi = y
             count = 0
-            
+
             while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
                 sr = zr * zr - zi * zi
                 si = 2.0 * zr * zi
@@ -241,7 +242,7 @@ def fatou_section_jit(
                 zr = zr - div_r
                 zi = zi - div_i
                 count += 1
-            
+
             section_counts[i, j] = count
     return section_counts
 
@@ -252,11 +253,11 @@ def fatou_section_jit(
 class MandelbrotCalculator:
     """
     Class for calculating Mandelbrot, Julia, and Fatou sets with color mapping.
-    
+
     Supports both CPU (multi-process) and GPU (CUDA) backends.
     Use set_use_gpu(True) to enable GPU acceleration.
     """
-    
+
     _use_gpu = GPU_AVAILABLE
     _gpu_instance = None
 
@@ -277,8 +278,16 @@ class MandelbrotCalculator:
         return cls._gpu_instance
 
     def _compute_iterations(
-        self, fractal_type, width, height, x_min, x_max, y_min, y_max,
-        max_iterations, c=None,
+        self,
+        fractal_type,
+        width,
+        height,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        max_iterations,
+        c=None,
     ):
         """
         Compute the raw int32 iteration array for the full image.
@@ -290,11 +299,11 @@ class MandelbrotCalculator:
         if self._use_gpu:
             try:
                 gpu_calc = self.get_gpu_calculator()
-                if fractal_type == 'mandelbrot':
+                if fractal_type == "mandelbrot":
                     return gpu_calc.calculate_mandelbrot_gpu(
                         width, height, x_min, x_max, y_min, y_max, max_iterations
                     )
-                elif fractal_type == 'julia':
+                elif fractal_type == "julia":
                     # "c or default" would replace the valid c = 0j (falsy!)
                     # with the default constant; only None means "use default".
                     if c is None:
@@ -302,7 +311,7 @@ class MandelbrotCalculator:
                     return gpu_calc.calculate_julia_gpu(
                         width, height, x_min, x_max, y_min, y_max, max_iterations, c
                     )
-                elif fractal_type == 'fatou':
+                elif fractal_type == "fatou":
                     return gpu_calc.calculate_fatou_gpu(
                         width, height, x_min, x_max, y_min, y_max, max_iterations
                     )
@@ -311,23 +320,35 @@ class MandelbrotCalculator:
                 self.set_use_gpu(False)
 
         # CPU path (full image as a single section)
-        if fractal_type == 'mandelbrot':
+        if fractal_type == "mandelbrot":
             return mandelbrot_section_jit(
                 0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
             )
-        elif fractal_type == 'julia':
+        elif fractal_type == "julia":
             if c is None:
                 c = complex(-0.7, 0.27015)
             return julia_section_jit(
                 0, width, width, height, x_min, x_max, y_min, y_max, max_iterations, c
             )
-        elif fractal_type == 'fatou':
+        elif fractal_type == "fatou":
             return fatou_section_jit(
                 0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
             )
         raise ValueError(f"Unknown fractal type: {fractal_type!r}")
 
-    def calculate_full(self, fractal_type, width, height, x_min, x_max, y_min, y_max, max_iterations, theme, c=None):
+    def calculate_full(
+        self,
+        fractal_type,
+        width,
+        height,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        max_iterations,
+        theme,
+        c=None,
+    ):
         """
         Calculate the full fractal image in one GPU/CPU call.
         More efficient than section-based calculation for GPU.

@@ -1,3 +1,6 @@
 [flake8]
 max-line-length = 88
 exclude = .git,__pycache__,tests/
+# E203 conflicts with black's spacing in complex slice expressions
+# (e.g. "offset:offset + width"); the project formats with black.
+extend-ignore = E203
