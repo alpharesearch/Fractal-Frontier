@@ -3,10 +3,20 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Quick start commands
+- **Create the project environment (miniconda)**
+  ```bash
+  make conda-env
+  ```
+  Creates conda env `fractal-frontier` (Python 3.12 – required because
+  numba does not support Python ≥3.13) and installs all dependencies.
+  All other targets auto-detect this env; override with
+  `CONDA_ENV=<name>` (e.g. `make test CONDA_ENV=bigcodebench`).
 - **Install dependencies**
   ```bash
   make install
   ```
+  Installs into the detected interpreter (conda env, venv, or system
+  python3 when conda is absent).
 - **Run the application**
   ```bash
   make run
