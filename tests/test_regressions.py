@@ -25,10 +25,23 @@ Viewer level (needs a display; skipped otherwise):
   - fractal_type_changed() keeps the dropdown variable in sync.
   - Pan/zoom keys are ignored while typing in an Entry widget.
   - fluid_zoom() always releases the is_zooming lock.
+  - Keyboard zoom anchors the view CENTER (Tk event.type is the string
+    '2'; comparing it with int 2 made the keyboard branch dead code and
+    keyboard zoom anchored at the mouse pointer instead).
+  - Mouse zoom anchors the point under the pointer.
+  - Panning preserves the view size (delta recomputed after moving the
+    first bound used to shrink the viewport 1% per pan keystroke).
   - Invalid Julia C input does not raise.
   - Degenerate view bounds reset instead of crashing the render request.
-  - Bookmarks are written to BOOKMARKS_FILE and old formats load safely.
+  - Bookmarks are written to BOOKMARKS_FILE and old formats load safely;
+    the write is atomic (temp file + rename).
+  - The "CPU Cores" randomizer excludes the meta-theme itself.
+  - The worker pool never spawns more processes than sections per render.
   - on_close() shuts down the render thread cleanly.
+
+Calculator level (Julia):
+  - The Julia constant c = 0j must be respected, not replaced by the
+    default ("c or default" treats 0j as falsy).
 """
 
 import json
@@ -166,6 +179,33 @@ def test_auto_iterations_scale_with_zoom():
     assert f(viewer, 0.26) >= 32, "floor not respected at extreme zoom-out"
 
 
+def test_julia_zero_constant_is_respected():
+    """c = 0j is a valid Julia constant (the disk |z| <= 2), but it is
+    falsy: the old "c = c or complex(default)" silently replaced it with
+    the default -0.7+0.27015j constant. Only None may trigger the default."""
+    calc = MandelbrotCalculator()
+    original = MandelbrotCalculator._use_gpu
+    try:
+        MandelbrotCalculator.set_use_gpu(False)
+        common = (
+            "julia", 32, 24, -2.0, 2.0, -2.0, 2.0, 40,
+        )
+        zero = calc._compute_iterations(*common, complex(0, 0))
+        default = calc._compute_iterations(*common, complex(-0.7, 0.27015))
+        none = calc._compute_iterations(*common)  # c defaults
+
+        # c = 0j: center never escapes (disk), the corner escapes immediately.
+        assert zero[12, 16] == 40, "z=0 must not escape with c=0j"
+        assert zero[0, 0] == 0, "z=-2-2j escapes at once with c=0j"
+        # It must be the 0j set, not the default rabbit set.
+        assert not np.array_equal(zero, default), (
+            "c=0j was replaced by the default Julia constant"
+        )
+        assert np.array_equal(none, default), "c=None must use the default"
+    finally:
+        MandelbrotCalculator.set_use_gpu(original)
+
+
 # ---------------------------------------------------------------------------
 # Viewer level (requires a display)
 # ---------------------------------------------------------------------------
@@ -210,7 +250,8 @@ def app():
 
 
 class _MouseEv:
-    """Fake mouse event (type != 2 => mouse path in zoom/fluid_zoom)."""
+    """Fake mouse event: Tk reports ButtonPress with the STRING type '4'
+    (the string '4' never equals '2' => mouse path in zoom/fluid_zoom)."""
 
     type = "4"
 
@@ -313,6 +354,135 @@ def test_entry_guard_ignores_pan_and_zoom_keys(app):
     assert not viewer.is_zooming
 
 
+def test_keyboard_zoom_anchors_view_center(app):
+    """Keyboard zoom (Next/Prior/q/e) must anchor at the CENTER of the view.
+
+    Tkinter reports event.type as the STRING '2' for key events; the
+    comparison "event.type == 2" (int) was always False, so keyboard zoom
+    silently used event.x/event.y — the mouse pointer position — as anchor.
+    This test fires a REAL Tk key event with the pointer parked at the
+    canvas top-left, where pointer-anchoring and center-anchoring differ.
+    """
+    viewer, root = app
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    viewer.width, viewer.height = 160, 120
+    center0_x, center0_y = -0.5, 0.0  # center of the classic view
+
+    # Key events are only delivered to a mapped window: deiconify off-screen.
+    root.geometry("+3000+3000")
+    root.deiconify()
+    try:
+        for _ in range(20):
+            root.update()
+        root.event_generate("<Next>", x=0, y=0, warp=True)  # zoom in, factor 0.5
+        for _ in range(40):
+            root.update()
+    finally:
+        root.withdraw()
+
+    center_x = (viewer.x_min + viewer.x_max) / 2
+    center_y = (viewer.y_min + viewer.y_max) / 2
+    width = viewer.x_max - viewer.x_min
+    assert center_x == pytest.approx(center0_x, abs=1e-12), (
+        f"keyboard zoom moved the view center to ({center_x}, {center_y}) "
+        "(pointer-anchored — event.type string/int bug)"
+    )
+    assert center_y == pytest.approx(center0_y, abs=1e-12), (
+        f"keyboard zoom moved the view center to ({center_x}, {center_y}) "
+        "(pointer-anchored — event.type string/int bug)"
+    )
+    assert width == pytest.approx(1.5, rel=1e-9), "zoom factor 0.5 must halve the width"
+
+    # fluid_zoom (q/e keys) must anchor at the center as well.
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    root.deiconify()
+    try:
+        for _ in range(20):
+            root.update()
+        root.event_generate("<e>", x=0, y=0, warp=True)  # fluid zoom out, factor 2
+        _pump(root, 1500)
+    finally:
+        root.withdraw()
+    assert viewer.x_max - viewer.x_min == pytest.approx(6.0, rel=1e-9)
+    assert (viewer.x_min + viewer.x_max) / 2 == pytest.approx(center0_x, abs=1e-12)
+    assert not viewer.is_zooming
+
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    viewer.draw_mandelbrot()
+
+
+def test_mouse_zoom_anchors_pointer(app):
+    """Mouse zoom must keep anchoring at the point under the cursor (the
+    keyboard fix must not swallow mouse events into the center path)."""
+    viewer, root = app
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    viewer.width, viewer.height = 160, 120
+    viewer.zoom(_MouseEv(x=0, y=0), 0.5)  # pointer at canvas top-left
+    # The world point under (0, 0) is (x_min, y_min) = (-2, -1.5); the zoomed
+    # view must be centered there.
+    assert (viewer.x_min + viewer.x_max) / 2 == pytest.approx(-2.0, abs=1e-12)
+    assert (viewer.y_min + viewer.y_max) / 2 == pytest.approx(-1.5, abs=1e-12)
+    assert viewer.x_max - viewer.x_min == pytest.approx(1.5, rel=1e-9)
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    viewer.draw_mandelbrot()
+
+
+def test_pan_preserves_view_size(app):
+    """Panning must move the view without changing its size. Each pan
+    recomputed (max - min) after moving the first bound, shrinking the
+    viewport by 1% per keystroke (10 pans => ~10% zoom-in for free)."""
+    viewer, root = app
+    # Square canvas so the aspect adjustment is a no-op for the size check.
+    viewer.width, viewer.height = 160, 160
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+
+    class PanEv:
+        type = "2"
+
+        def __init__(self, root):
+            self.widget = root
+
+    ev = PanEv(root)
+    w0 = viewer.x_max - viewer.x_min
+    h0 = viewer.y_max - viewer.y_min
+    for _ in range(10):
+        viewer.move_right(ev)
+        viewer.move_up(ev)
+    assert viewer.x_max - viewer.x_min == pytest.approx(w0, rel=1e-12), (
+        "horizontal pan changed the view width (1%-shrink bug)"
+    )
+    assert viewer.y_max - viewer.y_min == pytest.approx(h0, rel=1e-12), (
+        "vertical pan changed the view height (1%-shrink bug)"
+    )
+    # The pans must have actually moved the view.
+    assert viewer.x_max > 1.0 and viewer.y_max < 1.5
+
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = -2.0, 1.0, -1.5, 1.5
+    viewer.width, viewer.height = 160, 120
+    viewer.draw_mandelbrot()
+
+
+def test_cpu_cores_randomizer_excludes_meta_theme(app):
+    """The "CPU Cores" theme assigns a random theme per section. Picking
+    from the full themes list could select "CPU Cores" itself; it has no
+    theme function and silently rendered that section as "Default"."""
+    viewer, _ = app
+    assert viewer.CPU_CORES_THEME not in viewer._theme_choices, (
+        "CPU Cores randomizer pool contains the meta-theme"
+    )
+    assert set(viewer._theme_choices) == set(viewer.themes) - {
+        viewer.CPU_CORES_THEME
+    }
+
+
+def test_pool_is_capped_at_section_limit(app):
+    """A render submits at most 32 section tasks; the pool must not spawn
+    more worker processes than can ever receive one."""
+    viewer, _ = app
+    assert viewer.pool._processes <= 32
+    assert viewer.pool._processes == max(1, min(viewer.num_cores, 32))
+
+
 def test_fluid_zoom_releases_lock(app):
     """A failure mid-animation used to leave is_zooming stuck True forever;
     the lock must be released when the animation finishes."""
@@ -366,6 +536,8 @@ def test_bookmark_roundtrip_and_old_format(app, monkeypatch, tmp_path):
     viewer.save_bookmark()
     data = json.loads(target.read_text())
     assert data and "fractal_type" in data[-1]
+    # Atomic write: the temp file must be renamed away, never left behind.
+    assert not (tmp_path / "bookmarks.json.tmp").exists()
 
     # Old-format bookmark: only bounds present.
     target.write_text(json.dumps([{"x_min": -1.0, "x_max": 0.0}]))

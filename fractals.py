@@ -295,7 +295,10 @@ class MandelbrotCalculator:
                         width, height, x_min, x_max, y_min, y_max, max_iterations
                     )
                 elif fractal_type == 'julia':
-                    c = c or complex(-0.7, 0.27015)
+                    # "c or default" would replace the valid c = 0j (falsy!)
+                    # with the default constant; only None means "use default".
+                    if c is None:
+                        c = complex(-0.7, 0.27015)
                     return gpu_calc.calculate_julia_gpu(
                         width, height, x_min, x_max, y_min, y_max, max_iterations, c
                     )
@@ -313,7 +316,8 @@ class MandelbrotCalculator:
                 0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
             )
         elif fractal_type == 'julia':
-            c = c or complex(-0.7, 0.27015)
+            if c is None:
+                c = complex(-0.7, 0.27015)
             return julia_section_jit(
                 0, width, width, height, x_min, x_max, y_min, y_max, max_iterations, c
             )

@@ -22,7 +22,7 @@ def test_zoom_persists_view_bounds_and_redraws():
 
     # Simulate a wheel event at the canvas centre
     class Event:
-        type = "2"          # mousewheel / wheel scroll event in Tkinter
+        type = "4"          # mouse button/wheel press in Tkinter (string!)
         x = viewer.width // 2
         y = viewer.height // 2
 

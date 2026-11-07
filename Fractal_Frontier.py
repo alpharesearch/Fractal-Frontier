@@ -106,6 +106,12 @@ class MandelbrotViewer:
             self.CPU_CORES_THEME,
         ]
         self.color_theme_var = tk.StringVar(value=self.color_theme)
+        # Theme pool for the "CPU Cores" randomizer: it must exclude the
+        # meta-theme itself. A section that drew "CPU Cores" had no matching
+        # theme function and silently rendered as "Default".
+        self._theme_choices = [
+            theme for theme in self.themes if theme != self.CPU_CORES_THEME
+        ]
         self.theme_menu = ttk.OptionMenu(
             self.control_frame,
             self.color_theme_var,
@@ -286,7 +292,9 @@ class MandelbrotViewer:
         self.num_cores = multiprocessing.cpu_count()
         if multiprocessing.get_start_method(allow_none=True) != "spawn":
             multiprocessing.set_start_method("spawn", force=True)
-        self.pool = multiprocessing.Pool(processes=self.num_cores)
+        # A render never submits more than 32 section tasks, so a pool
+        # larger than 32 only spawns workers that can never get work.
+        self.pool = multiprocessing.Pool(processes=max(1, min(self.num_cores, 32)))
         self.calculator = MandelbrotCalculator()  # Reintroduce the calculator
         self.resize_job = None
 
@@ -569,7 +577,9 @@ class MandelbrotViewer:
             for i in range(num_sections):
                 piece = iterations[:, offset:offset + section_widths[i]]
                 pieces.append(
-                    apply_color_theme(piece, max_iterations, random.choice(self.themes))
+                    apply_color_theme(
+                        piece, max_iterations, random.choice(self._theme_choices)
+                    )
                 )
                 offset += section_widths[i]
             return np.hstack(pieces)
@@ -582,7 +592,11 @@ class MandelbrotViewer:
         offset = 0
         for i in range(num_sections):
             section_width = section_widths[i]
-            task_theme = random.choice(self.themes) if is_cpu_cores_theme else theme
+            task_theme = (
+                random.choice(self._theme_choices)
+                if is_cpu_cores_theme
+                else theme
+            )
             task = (
                 offset, section_width, width, height,
                 x_min, x_max, y_min, y_max, max_iterations, task_theme,
@@ -625,7 +639,10 @@ class MandelbrotViewer:
             self.canvas.itemconfigure(self._image_item, image=self.photo)
 
         # If the GPU failed at runtime the calculator fell back to CPU; sync
-        # the viewer state and checkbox so the user can see it.
+        # the viewer state and checkbox so the user can see it. The flag is a
+        # plain bool (GIL-atomic reads/writes), so the only cost of the
+        # worker/main-thread interleaving is a checkbox that lags by at most
+        # one rendered frame.
         if (
             self.gpu_var is not None
             and bool(MandelbrotCalculator._use_gpu) != self.use_gpu
@@ -676,7 +693,15 @@ class MandelbrotViewer:
         if pool is not None:
             try:
                 pool.close()
-                pool.join()
+                # pool.join() blocks until an in-flight deep-zoom starmap
+                # finishes; cap the wait so closing the window never hangs,
+                # and terminate the workers if they are still computing.
+                joiner = threading.Thread(target=pool.join, daemon=True)
+                joiner.start()
+                joiner.join(timeout=5)
+                if joiner.is_alive():
+                    pool.terminate()
+                    joiner.join(timeout=5)
             except Exception:
                 pass
 
@@ -713,8 +738,12 @@ class MandelbrotViewer:
                 messagebox.showerror("Error", f"Failed to load bookmarks: {e}")
         bookmarks.append(bookmark)
         try:
-            with open(file_path, "w") as f:
+            # Atomic write: dump to a temp file and rename, so a crash
+            # mid-write can never leave a half-written bookmarks.json.
+            tmp_path = file_path + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(bookmarks, f, indent=2)
+            os.replace(tmp_path, file_path)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save bookmark: {e}")
 
@@ -841,8 +870,10 @@ class MandelbrotViewer:
             index = selection[0]
             del bookmarks[index]
             try:
-                with open(file_path, "w") as f:
+                tmp_path = file_path + ".tmp"
+                with open(tmp_path, "w") as f:
                     json.dump(bookmarks, f, indent=2)
+                os.replace(tmp_path, file_path)
                 lb.delete(index)
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete bookmark: {e}")
@@ -894,7 +925,10 @@ class MandelbrotViewer:
         try:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
-            if event.type == 2:
+            # Tkinter reports event.type as a STRING ('2' = KeyPress,
+            # '4'/'5' = ButtonPress); comparing with int 2 was always False,
+            # so keyboard zoom silently fell into the pointer-anchored path.
+            if str(event.type) == "2":
                 center_x = (self.x_min + self.x_max) / 2
                 center_y = (self.y_min + self.y_max) / 2
             else:
@@ -948,7 +982,7 @@ class MandelbrotViewer:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
 
-            if event.type == 2:  # Keyboard event
+            if str(event.type) == "2":  # Keyboard event (Tk type is a string)
                 center_x = (self.x_min + self.x_max) / 2
                 center_y = (self.y_min + self.y_max) / 2
             else:  # Mouse event
@@ -1008,8 +1042,11 @@ class MandelbrotViewer:
         """
         if self._typing_in_entry(event):
             return
-        self.y_min += 0.1 * (self.y_max - self.y_min)
-        self.y_max += 0.1 * (self.y_max - self.y_min)
+        # Delta must be computed BEFORE moving the first bound; recomputing
+        # (y_max - y_min) after the update shrank the viewport 1% per pan.
+        dy = 0.1 * (self.y_max - self.y_min)
+        self.y_min += dy
+        self.y_max += dy
         self.draw_mandelbrot()
 
     def move_up(self, event):
@@ -1021,8 +1058,9 @@ class MandelbrotViewer:
         """
         if self._typing_in_entry(event):
             return
-        self.y_min -= 0.1 * (self.y_max - self.y_min)
-        self.y_max -= 0.1 * (self.y_max - self.y_min)
+        dy = 0.1 * (self.y_max - self.y_min)
+        self.y_min -= dy
+        self.y_max -= dy
         self.draw_mandelbrot()
 
     def move_left(self, event):
@@ -1034,8 +1072,10 @@ class MandelbrotViewer:
         """
         if self._typing_in_entry(event):
             return
-        self.x_min -= 0.1 * (self.x_max - self.x_min)
-        self.x_max -= 0.1 * (self.x_max - self.x_min)
+        # Delta computed once, before any bound is moved (see move_down).
+        dx = 0.1 * (self.x_max - self.x_min)
+        self.x_min -= dx
+        self.x_max -= dx
         self.draw_mandelbrot()
 
     def move_right(self, event):
@@ -1047,8 +1087,9 @@ class MandelbrotViewer:
         """
         if self._typing_in_entry(event):
             return
-        self.x_min += 0.1 * (self.x_max - self.x_min)
-        self.x_max += 0.1 * (self.x_max - self.x_min)
+        dx = 0.1 * (self.x_max - self.x_min)
+        self.x_min += dx
+        self.x_max += dx
         self.draw_mandelbrot()
 
     def toggle_auto_adjust(self):
