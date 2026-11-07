@@ -40,6 +40,17 @@ WHEEL_COALESCE_MS = 120  # wheel notches merge into one animated zoom
 # only up to this zoom level; deeper views keep the float64 kernel.
 GPU_FLOAT32_MAX_ZOOM = 10.0
 
+# Interactive preview settings.  A pan preview is rendered at quarter
+# resolution over a 3x-viewport region: it costs ~56% of a full viewport
+# render but lets the user pan one full viewport in any direction before a
+# new cache is needed.  A zoom preview is half resolution over exactly the
+# viewport (one quarter of the pixels), since a scale change invalidates the
+# pan cache anyway.
+PAN_PREVIEW_SCALE = 0.25
+PAN_PREVIEW_MARGIN = 1.0
+ZOOM_PREVIEW_SCALE = 0.5
+POLL_MS = 16
+
 
 def wheel_factor_from_delta(delta):
     """Wheel factor for a Tk delta (Windows/macOS): scroll up (positive,
@@ -351,8 +362,16 @@ class MandelbrotViewer:
         self._render_queue = queue.Queue()
         self._result_queue = queue.Queue()
         self._render_seq = 0
+        self._last_applied_seq = 0
         self._closed = False
         self._image_item = None
+        # Interaction state: previews are shown while the user drags or
+        # animates a zoom, then a full-resolution render is requested when
+        # the interaction settles.  The pan cache is a rendered preview that
+        # covers the viewport plus a one-viewport margin on every side.
+        self._interacting = False
+        self._interaction_mode = None  # "pan" or "zoom"
+        self._pan_cache = None
         self._render_thread = threading.Thread(target=self._render_worker, daemon=True)
         self._render_thread.start()
         self._poll_results()
@@ -500,9 +519,15 @@ class MandelbrotViewer:
         self.y_min = y_center - y_range / 2
         self.y_max = y_center + y_range / 2
 
-    def draw_mandelbrot(self):
+    def draw_mandelbrot(self, preview=False, overscan=False):
         """
         Request a render of the current view (non-blocking).
+
+        `preview=True` renders a lower-resolution frame for interaction.
+        `overscan=True` expands a pan preview beyond the viewport, so the
+        result can be cached and cropped while the user drags without waiting
+        for another calculation.  A normal call requests the full-resolution
+        image once an interaction settles.
 
         The actual computation runs on a worker thread; the previous pending
         request is dropped so rapid input (zooming, panning, slider drags)
@@ -541,23 +566,48 @@ class MandelbrotViewer:
         # divide by zero or normalize against a negative iteration count.
         self.max_iterations = max(1, int(self.auto_iterations + self.iteration_offset))
 
-        num_sections = max(1, min(self.num_cores, 32, self.width))
-        base_width = max(1, self.width // num_sections)
+        if preview and overscan:
+            scale = PAN_PREVIEW_SCALE
+            margin_x = max(1, int(self.width * PAN_PREVIEW_MARGIN))
+            margin_y = max(1, int(self.height * PAN_PREVIEW_MARGIN))
+            x_range = float(self.x_max - self.x_min)
+            y_range = float(self.y_max - self.y_min)
+            cache_x_min = self.x_min - margin_x / self.width * x_range
+            cache_x_max = self.x_max + margin_x / self.width * x_range
+            cache_y_min = self.y_min - margin_y / self.height * y_range
+            cache_y_max = self.y_max + margin_y / self.height * y_range
+            render_width = max(2, int((self.width + 2 * margin_x) * scale))
+            render_height = max(2, int((self.height + 2 * margin_y) * scale))
+            bounds = (cache_x_min, cache_x_max, cache_y_min, cache_y_max)
+        elif preview:
+            scale = ZOOM_PREVIEW_SCALE
+            margin_x = margin_y = 0
+            render_width = max(2, int(self.width * scale))
+            render_height = max(2, int(self.height * scale))
+            bounds = None
+        else:
+            scale = 1.0
+            margin_x = margin_y = 0
+            render_width, render_height = self.width, self.height
+            bounds = None
+
+        num_sections = max(1, min(self.num_cores, 32, render_width))
+        base_width = max(1, render_width // num_sections)
         # The last section absorbs the remainder so the sections exactly cover
-        # the canvas width (integer division used to leave a black strip).
+        # the render width (integer division used to leave a black strip).
         section_widths = [base_width] * num_sections
-        section_widths[-1] += self.width - base_width * num_sections
+        section_widths[-1] += render_width - base_width * num_sections
 
         precision = "float32" if self.zoom_level <= GPU_FLOAT32_MAX_ZOOM else "float64"
         self._render_precision = precision
         params = {
             "fractal_type": self.fractal_type_var.get(),
-            "width": self.width,
-            "height": self.height,
-            "x_min": float(self.x_min),
-            "x_max": float(self.x_max),
-            "y_min": float(self.y_min),
-            "y_max": float(self.y_max),
+            "width": render_width,
+            "height": render_height,
+            "x_min": float(bounds[0]) if bounds else float(self.x_min),
+            "x_max": float(bounds[1]) if bounds else float(self.x_max),
+            "y_min": float(bounds[2]) if bounds else float(self.y_min),
+            "y_max": float(bounds[3]) if bounds else float(self.y_max),
             "max_iterations": self.max_iterations,
             "color_theme": self.color_theme,
             "julia_c": self.julia_c,
@@ -565,6 +615,11 @@ class MandelbrotViewer:
             "precision": precision,
             "num_sections": num_sections,
             "section_widths": section_widths,
+            "preview": preview,
+            "overscan": overscan,
+            "preview_scale": scale,
+            "zoom_level": self.zoom_level,
+            "cache_bounds": bounds,
         }
 
         self._render_seq += 1
@@ -592,10 +647,10 @@ class MandelbrotViewer:
                 full_array = self._compute_full(params)
             except Exception as exc:  # never kill the worker thread
                 print(f"Render error (seq {seq}): {exc!r}")
-                self._result_queue.put(("error", (seq, repr(exc))))
+                self._result_queue.put(("error", (seq, repr(exc), params)))
                 continue
             elapsed = time.time() - start_time
-            self._result_queue.put(("done", (seq, full_array, elapsed)))
+            self._result_queue.put(("done", (seq, full_array, elapsed, params)))
 
     def _poll_results(self):
         """Apply finished renders on the Tk main thread (recurring)."""
@@ -603,16 +658,18 @@ class MandelbrotViewer:
             while True:
                 kind, payload = self._result_queue.get_nowait()
                 if kind == "done":
-                    seq, full_array, elapsed = payload
-                    self._apply_render(seq, full_array, elapsed)
+                    seq, full_array, elapsed, params = payload
+                    self._apply_render(seq, full_array, elapsed, params)
                 else:
-                    seq, message = payload
+                    seq, message, params = payload
                     self._apply_render_error(seq, message)
         except queue.Empty:
             pass
         if not self._closed:
             try:
-                self.master.after(50, self._poll_results)
+                # Poll often enough to display preview frames during an
+                # animation; 50 ms limited the visible update rate to 20 Hz.
+                self.master.after(POLL_MS, self._poll_results)
             except tk.TclError:
                 pass  # root window was destroyed
 
@@ -739,11 +796,16 @@ class MandelbrotViewer:
 
         return apply_color_theme(iterations, max_iterations, theme)
 
-    def _apply_render(self, seq, full_array, elapsed):
-        """Display a finished render (main thread). Stale results are dropped."""
-        if self._closed or seq != self._render_seq:
-            return
-        image = Image.fromarray(full_array, mode="RGB")
+    def _set_image(self, array, preview=False):
+        """Build one PhotoImage from an RGB array and update the canvas item.
+
+        Preview arrays are smaller than the canvas and are upscaled here;
+        resizing is a display concern, deliberately separated from the
+        fractal calculation in the worker thread.
+        """
+        image = Image.fromarray(array, mode="RGB")
+        if image.size != (self.width, self.height):
+            image = image.resize((self.width, self.height), Image.Resampling.BILINEAR)
         self.photo = ImageTk.PhotoImage(image)
         # Keep exactly one canvas image item; update it in place instead of
         # stacking a new item (and a new Tcl image) on every redraw.
@@ -753,6 +815,123 @@ class MandelbrotViewer:
             )
         else:
             self.canvas.itemconfigure(self._image_item, image=self.photo)
+        # A drag may have shifted the item to follow the cursor; every new
+        # frame is drawn at the canvas origin so the contents and the view
+        # bounds stay aligned.
+        self.canvas.coords(self._image_item, 0, 0)
+
+    def _cache_matches_current_params(self):
+        """True if the pan cache was rendered for the current fractal state."""
+        cache = self._pan_cache
+        if cache is None:
+            return False
+        if cache["theme"] != self.color_theme:
+            return False
+        if cache["max_iterations"] != self.max_iterations:
+            return False
+        if cache["fractal_type"] != self.fractal_type_var.get():
+            return False
+        if cache["julia_c"] != self.julia_c:
+            return False
+        zoom = self.zoom_level
+        return abs(cache["zoom_level"] - zoom) <= 1e-9 * max(1.0, abs(zoom))
+
+    def _bounds_cover_current_view(self, bounds):
+        """True if the world-space bounds contain the current view."""
+        cx0, cx1, cy0, cy1 = bounds
+        vx0, vx1, vy0, vy1 = self.x_min, self.x_max, self.y_min, self.y_max
+        eps = 1e-12 * max(1.0, abs(cx0), abs(cx1), abs(cy0), abs(cy1))
+        return not (
+            vx0 < cx0 - eps or vx1 > cx1 + eps or vy0 < cy0 - eps or vy1 > cy1 + eps
+        )
+
+    def _cache_crop_for_current_view(self):
+        """Return the pan-cache crop for the current view, or None."""
+        cache = self._pan_cache
+        if cache is None or not self._cache_matches_current_params():
+            return None
+        if not self._bounds_cover_current_view(cache["bounds"]):
+            return None
+
+        cx0, cx1, cy0, cy1 = cache["bounds"]
+        vx0, vx1, vy0, vy1 = self.x_min, self.x_max, self.y_min, self.y_max
+        array = cache["array"]
+        cache_h, cache_w = array.shape[:2]
+        fx0 = (vx0 - cx0) / (cx1 - cx0) * cache_w
+        fx1 = (vx1 - cx0) / (cx1 - cx0) * cache_w
+        fy0 = (vy0 - cy0) / (cy1 - cy0) * cache_h
+        fy1 = (vy1 - cy0) / (cy1 - cy0) * cache_h
+        j0 = max(0, min(cache_w - 1, int(math.floor(fx0))))
+        j1 = max(j0 + 1, min(cache_w, int(math.ceil(fx1))))
+        i0 = max(0, min(cache_h - 1, int(math.floor(fy0))))
+        i1 = max(i0 + 1, min(cache_h, int(math.ceil(fy1))))
+        crop = array[i0:i1, j0:j1]
+        return crop if crop.size else None
+
+    def _display_cached_pan(self):
+        """Display the cached preview for the current view without computing."""
+        crop = self._cache_crop_for_current_view()
+        if crop is None:
+            return False
+        self._set_image(crop, preview=True)
+        return True
+
+    def _apply_render(self, seq, full_array, elapsed, params=None):
+        """Display a finished render (main thread).
+
+        Current results always win. Stale frames are still useful during a
+        zoom animation, and a stale overscan pan frame can be reused as a
+        cache if its expanded bounds still contain the current view. Other
+        stale pan frames would jump backwards and are dropped.
+        """
+        params = params or {}
+        if self._closed:
+            return
+        current = seq == self._render_seq
+        preview = bool(params.get("preview"))
+        overscan = bool(params.get("overscan"))
+        if not current:
+            zoom_preview = (
+                self._interacting
+                and self._interaction_mode == "zoom"
+                and preview
+                and not overscan
+            )
+            pan_overscan = (
+                self._interacting
+                and self._interaction_mode == "pan"
+                and preview
+                and overscan
+                and self._bounds_cover_current_view(params["cache_bounds"])
+            )
+            if not (zoom_preview or pan_overscan):
+                return
+        if seq <= self._last_applied_seq:
+            return
+        self._last_applied_seq = seq
+
+        if preview and overscan:
+            self._pan_cache = {
+                "array": full_array,
+                "bounds": params["cache_bounds"],
+                "theme": params["color_theme"],
+                "max_iterations": params["max_iterations"],
+                "fractal_type": params["fractal_type"],
+                "julia_c": params["julia_c"],
+                "zoom_level": params["zoom_level"],
+            }
+            crop = self._cache_crop_for_current_view()
+            if crop is not None:
+                self._set_image(crop, preview=True)
+            elif current:
+                self._set_image(full_array, preview=True)
+            else:
+                return
+        else:
+            self._set_image(full_array, preview=preview)
+
+        if not current:
+            return
 
         # If the GPU failed at runtime the calculator fell back to CPU; sync
         # the viewer state and checkbox so the user can see it. The flag is a
@@ -765,6 +944,12 @@ class MandelbrotViewer:
         ):
             self.use_gpu = bool(MandelbrotCalculator._use_gpu)
             self.gpu_var.set(self.use_gpu)
+
+        # Preview frames leave the status bar on "Computing…"; updating the
+        # layout at interaction rate can resize the canvas and make the drag
+        # jitter. Only the settled full-resolution frame updates it.
+        if preview:
+            return
 
         num_sections = max(1, min(self.num_cores, 32, self.width))
         backend = (
@@ -1104,6 +1289,11 @@ class MandelbrotViewer:
             return
 
         self.is_zooming = True
+        self._interacting = True
+        self._interaction_mode = "zoom"
+        # A scale change invalidates the pan cache: its pixels correspond
+        # to the old zoom level.
+        self._pan_cache = None
         try:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
@@ -1139,23 +1329,31 @@ class MandelbrotViewer:
                 """
                 if frame >= frames:
                     self.is_zooming = False  # Reset zooming flag after animation
+                    self._interacting = False
+                    self._interaction_mode = None
+                    # The animation used previews; settle at full resolution.
+                    self.draw_mandelbrot()
                     return
                 try:
                     self.x_min += step_x_min
                     self.x_max += step_x_max
                     self.y_min += step_y_min
                     self.y_max += step_y_max
-                    self.draw_mandelbrot()
+                    self.draw_mandelbrot(preview=True, overscan=False)
                     self.master.after(frame_duration, animate_zoom_step, frame + 1)
                 except Exception as exc:
                     # Runs in a later event-loop tick, so the outer try/except
                     # cannot catch this; always release the zoom lock.
                     print(f"Zoom animation error: {exc!r}")
                     self.is_zooming = False
+                    self._interacting = False
+                    self._interaction_mode = None
 
             animate_zoom_step()
         except Exception:
             self.is_zooming = False  # Ensure flag is reset in case of an error
+            self._interacting = False
+            self._interaction_mode = None
 
     _PAN_THRESHOLD_PX = 4
 
@@ -1193,7 +1391,29 @@ class MandelbrotViewer:
         # opposite way in world coordinates.
         self.y_min -= dy / self.height * height
         self.y_max -= dy / self.height * height
-        self.draw_mandelbrot()
+
+        self._interacting = True
+        self._interaction_mode = "pan"
+        # Move the existing image immediately with the cursor. This is the
+        # "grab" part of grab-pan: the fractal data need not be recalculated
+        # before the canvas starts following the drag.
+        if self._image_item is not None:
+            self.canvas.move(self._image_item, dx, dy)
+
+        if self._display_cached_pan():
+            # The cache already covers this view. Invalidate any older
+            # pending render so it cannot overwrite the crop.
+            self._render_seq += 1
+            try:
+                self._render_queue.get_nowait()
+            except queue.Empty:
+                pass
+        else:
+            # Cache absent, invalid, or too small for this view: request a
+            # new overscan cache. A stale result may still cover the current
+            # view (the margin is one viewport), in which case it is reused.
+            self._pan_cache = None
+            self.draw_mandelbrot(preview=True, overscan=True)
 
     def _pan_release(self, event):
         """Finish a pan, or perform the plain click zoom when no drag
@@ -1204,6 +1424,10 @@ class MandelbrotViewer:
         self._pan_last = None
         if panned:
             self.canvas.config(cursor="")
+            self._interacting = False
+            self._interaction_mode = None
+            # The drag used a preview; settle at full resolution now.
+            self.draw_mandelbrot()
             return
         if getattr(self, "_closed", False):
             return

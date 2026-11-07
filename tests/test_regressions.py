@@ -718,6 +718,51 @@ def test_pool_is_capped_at_section_limit(app):
     assert viewer.pool._processes == max(1, min(viewer.num_cores, 32))
 
 
+def test_pan_preview_cache_is_cropped_without_recompute(app):
+    """The pan preview renders an overscan region; a small drag must be
+    served by cropping that cached image instead of requesting a full
+    render for every motion event."""
+    viewer, root = app
+    viewer.width, viewer.height = 160, 120
+    viewer.x_min, viewer.x_max = -2.0, 1.0
+    viewer.y_min, viewer.y_max = -1.125, 1.125
+    viewer.zoom_level = viewer.base_range / 3.0
+    viewer._pan_cache = None
+    try:
+        viewer.draw_mandelbrot(preview=True, overscan=True)
+        deadline = time.time() + 5.0
+        while time.time() < deadline and viewer._pan_cache is None:
+            root.update()
+            time.sleep(0.02)
+        assert viewer._pan_cache is not None, "no pan cache was stored"
+        crop = viewer._cache_crop_for_current_view()
+        assert crop is not None and crop.ndim == 3 and crop.size > 0
+
+        class PtEv:
+            type = "4"
+
+            def __init__(self, x, y, widget):
+                self.x, self.y, self.widget = x, y, widget
+
+        seq_before = viewer._render_seq
+        viewer._pan_start = (80, 60)
+        viewer._pan_last = (80, 60)
+        viewer._panning = True
+        viewer._pan_motion(PtEv(90, 60, root))
+        # A cached crop is instant; no new render sequence is queued.
+        assert viewer._render_seq == seq_before + 1
+        assert viewer._pan_cache is not None
+        viewer._pan_release(PtEv(90, 60, root))
+        viewer.draw_mandelbrot()
+        assert _wait_for_render(viewer, root)
+    finally:
+        viewer._pan_cache = None
+        viewer.width, viewer.height = 160, 120
+        viewer.x_min, viewer.x_max = -2.0, 1.0
+        viewer.y_min, viewer.y_max = -1.125, 1.125
+        viewer.draw_mandelbrot()
+
+
 def test_fluid_zoom_releases_lock(app):
     """A failure mid-animation used to leave is_zooming stuck True forever;
     the lock must be released when the animation finishes."""
