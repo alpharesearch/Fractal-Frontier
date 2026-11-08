@@ -28,7 +28,7 @@ Fractal Frontier/
 ├── pytest.ini                    # Test configuration and warning policy
 ├── Makefile                      # Environment, test, lint, format, and run targets
 ├── README.md                     # Documentation for the project
-├── CLAUDE.md                     # Architecture and development guidance
+├── AGENTS.md                     # Architecture and development guidance
 ├── LICENSE                       # MIT License
 ├── .gitignore                    # Files and directories ignored by version control
 └── tests/                        # Test suite directory

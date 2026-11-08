@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
 ## Quick start commands
 - **Create the project environment (miniconda)**
@@ -30,14 +30,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   ```bash
   pytest tests/test_calculator.py
   ```
-- **Linting** – No lint configuration is provided; however, you may use flake8 manually:
+- **Linting** – Run flake8 with the project's `.flake8` configuration:
   ```bash
-  pip install flake8
-  flake8 Fractal_Frontier.py
+  make lint
   ```
+  Settings: max line length 88 (matches black), `tests/` excluded from
+  linting, `E203` ignored (conflicts with black's slice spacing).
 - **Formatting** – The project uses black and isort for code formatting. Run with:
   ```bash
   make format
+  ```
+- **Full check** – Format and lint in one pass:
+  ```bash
+  make check
+  ```
+- **Environment check** – Show the interpreter and runtime deps the targets will use:
+  ```bash
+  make env-check
   ```
 - **Cleaning** – Remove build artifacts with:
   ```bash
@@ -55,12 +64,15 @@ Fractal Frontier/            # root of the repository
 ├── fractals.py              # CPU/GPU calculator and backend selection
 ├── gpu_fractals.py          # Numba CUDA kernels and launch configuration
 ├── themes.py                # Colour themes and palette helpers
+├── __init__.py              # Public package API (calculator, JIT kernels, themes)
 ├── requirements.txt         # Runtime and development dependencies
 ├── pytest.ini               # Test configuration and warning policy
 ├── Makefile                 # Environment, test, lint, format, and run targets
 ├── README.md                # High‑level documentation
-├── CLAUDE.md                # Architecture and development guidance
+├── AGENTS.md                # Architecture and development guidance
 ├── LICENSE                  # MIT license
+├── .flake8                  # Lint configuration
+├── .gitignore               # Ignored files (pycache, caches, aider history)
 └── tests/                   # Test suite directory
     ├── test_calculator.py
     ├── test_colors.py
@@ -91,6 +103,25 @@ The core logic lives in `Fractal_Frontier.py`:
   ```
   Use breakpoints in `MandelbrotViewer.draw_mandelbrot()` or the JIT function as needed.
 - **Bookmarks**: The current implementation stores bookmarks in `bookmarks.json`. Modify the file directly if you wish to pre‑populate views. The application now supports saving and loading bookmarks for different fractal types (Mandelbrot, Julia, Fatou) with their associated parameters.
+
+## Repository conventions
+- **Commit messages** follow Conventional Commits: `type(scope): summary` —
+  e.g. `perf(pan): …`, `fix(zoom): …`, `feat(ux): …`, `docs(release): …`.
+  Common types: `feat`, `fix`, `perf`, `refactor`, `test`, `build`, `chore`, `style`, `docs`.
+- **Version bumps**: the app version lives in two places — `self.app_name`
+  in `Fractal_Frontier.py` (e.g. `"Fractal Frontier V1.3"`) and the
+  `**Version:**` line in `README.md`. Bump both in the same `docs(release):` commit.
+- **Formatting**: black + isort (`make format`); keep lines ≤ 88 so flake8
+  and black agree. Main-code files are kept flake8-clean (`tests/` is excluded).
+- **Tests**: plain pytest under `tests/`. Long-running tests carry
+  `@pytest.mark.timeout(n)` (pytest-timeout plugin). GPU tests are guarded
+  with `@pytest.mark.skipif(not GPU_AVAILABLE, …)` so the default test run
+  never requires CUDA hardware.
+- **Public API**: the root `__init__.py` re-exports `MandelbrotCalculator`,
+  the JIT section kernels, and `apply_color_theme`. Keep it in sync when
+  adding public entry points.
+- **Dev tools**: flake8, pytest, pytest-timeout, black, isort, and autopep8
+  are pinned in `requirements.txt` and installed by `make install`.
 
 ## Licensing and usage notes
 The repository is licensed under the MIT License. All code may be used, modified, and redistributed freely.
