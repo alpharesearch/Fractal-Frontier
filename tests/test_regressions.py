@@ -882,6 +882,16 @@ def test_tile_display_uses_full_resolution_when_frame_budget_is_met(tile_view):
     assert viewer._tile_display_scale == 1.0
 
 
+def test_title_reports_three_decimal_elapsed_and_fps(app):
+    """The title bar shows sub-millisecond render times and live FPS."""
+    viewer, _ = app
+    viewer._fps = 59.94
+    viewer._update_title(0.004)
+    title = viewer.master.title()
+    assert "0.004s" in title
+    assert "FPS: 59.9" in title
+
+
 def test_preview_scale_degrades_only_when_frame_budget_is_missed(app):
     """The adaptive controller keeps full resolution unless a frame is slow."""
     from Fractal_Frontier import FRAME_BUDGET_MS

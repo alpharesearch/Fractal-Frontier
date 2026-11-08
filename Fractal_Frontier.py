@@ -90,6 +90,10 @@ class MandelbrotViewer:
         """
         self.master = master
         self.app_name = "Fractal Frontier V1.2"
+        self._fps = None
+        self._last_preview_frame_at = None
+        self._title_elapsed = 0.0
+        self._last_title_update = 0.0
         self.width = 160
         self.height = 120
         self.max_iterations = 100
@@ -1230,6 +1234,7 @@ class MandelbrotViewer:
             crop = crop[::step, ::step]
         rgb = self._colorize(crop, self.max_iterations, self.color_theme)
         self._set_image(rgb, preview=True)
+        self._record_preview_frame()
         frame_ms = (time.perf_counter() - start) * 1000.0
         (
             self._tile_display_scale,
@@ -1239,6 +1244,42 @@ class MandelbrotViewer:
             scale, frame_ms, self._tile_slow_streak, self._tile_fast_streak
         )
         return True
+
+    def _record_preview_frame(self):
+        """Track the interval between displayed preview frames.
+
+        This measures the actual presentation rate, not just compute time:
+        if the worker or main thread misses frames, the interval grows and
+        the reported FPS falls. Title updates are throttled to ~10 Hz.
+        """
+        now = time.perf_counter()
+        if self._last_preview_frame_at is not None:
+            interval = now - self._last_preview_frame_at
+            if interval > 0.0005:
+                instant = 1.0 / interval
+                if self._fps is None:
+                    self._fps = instant
+                else:
+                    self._fps = 0.8 * self._fps + 0.2 * instant
+        self._last_preview_frame_at = now
+        if now - self._last_title_update >= 0.1:
+            self._update_title()
+
+    def _update_title(self, elapsed=None):
+        """Refresh the title bar with render time and live preview FPS."""
+        if self._closed:
+            return
+        if elapsed is not None:
+            self._title_elapsed = elapsed
+        fps = "--" if self._fps is None else f"{self._fps:.1f}"
+        title_str = (
+            f"{self.app_name} | {self._title_elapsed:.3f}s | FPS: {fps} | "
+            + f"{self.zoom_level:.2f}x | Iter: {self.max_iterations} "
+            + f"(Base: {self.auto_iterations} + Off: {self.iteration_offset}) "
+            + f"| Theme: {self.color_theme}"
+        )
+        self.master.title(title_str)
+        self._last_title_update = time.perf_counter()
 
     def _apply_render(self, seq, full_array, elapsed, params=None):
         """Display a finished render (main thread).
@@ -1304,6 +1345,8 @@ class MandelbrotViewer:
             self._set_image(rgb, preview=preview)
 
         display_ms = (time.perf_counter() - display_start) * 1000.0
+        if preview:
+            self._record_preview_frame()
         if preview and not overscan:
             # Zoom previews pay both worker compute time and main-thread
             # colour/display time. Drop resolution only when that frame
@@ -1353,13 +1396,7 @@ class MandelbrotViewer:
             if self.use_gpu
             else f"Cores: {num_sections}"
         )
-        title_str = (
-            f"{self.app_name} | {elapsed:.2f}s | "
-            + f"{self.zoom_level:.2f}x | Iter: {self.max_iterations} "
-            + f"(Base: {self.auto_iterations} + Off: {self.iteration_offset}) "
-            + f"| Theme: {self.color_theme}"
-        )
-        self.master.title(title_str)
+        self._update_title(elapsed)
 
         coord_str = (
             f"X_min: {self.x_min:.16g}, X_max: {self.x_max:.16g} | "
@@ -1687,6 +1724,8 @@ class MandelbrotViewer:
             return
 
         self.is_zooming = True
+        self._fps = None
+        self._last_preview_frame_at = None
         self._interacting = True
         self._interaction_mode = "zoom"
         # A scale change invalidates both the pan cache and the tile grid:
@@ -1761,6 +1800,8 @@ class MandelbrotViewer:
         self._pan_start = (event.x, event.y)
         self._pan_last = (event.x, event.y)
         self._panning = False
+        self._fps = None
+        self._last_preview_frame_at = None
 
     def _pan_motion(self, event):
         """Drag = grab-pan: move the view window opposite to the cursor
@@ -1777,6 +1818,8 @@ class MandelbrotViewer:
             ):
                 return
             self._panning = True
+            self._fps = None
+            self._last_preview_frame_at = None
             self.canvas.config(cursor="fleur")
         dx = event.x - lx
         dy = event.y - ly
