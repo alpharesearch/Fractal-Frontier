@@ -861,19 +861,6 @@ def test_tile_cache_is_theme_independent_but_zoom_dependent(tile_view):
     assert viewer._tile_cache_is_valid()
     viewer.color_theme = "Grayscale"
     assert viewer._tile_cache_is_valid()
-    if not viewer._display_tile_view():
-        print(
-            "DEBUG",
-            viewer._tiles,
-            viewer._tile_index_range(
-                viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max
-            ),
-            viewer._tile_cache_is_valid(),
-            viewer._tile_params,
-            viewer._tile_anchor_x,
-            viewer._tile_anchor_y,
-            viewer._tile_world,
-        )
     assert viewer._display_tile_view()
 
     viewer.max_iterations += 1
@@ -883,6 +870,39 @@ def test_tile_cache_is_theme_independent_but_zoom_dependent(tile_view):
 
     viewer.zoom_level *= 2.0
     assert not viewer._tile_cache_is_valid()
+
+
+def test_tile_display_uses_full_resolution_when_frame_budget_is_met(tile_view):
+    """Full-resolution tiles are not unconditionally downscaled for display."""
+    viewer, _ = tile_view
+    viewer._tile_display_scale = 1.0
+    viewer._tile_slow_streak = 0
+    viewer._tile_fast_streak = 0
+    assert viewer._display_tile_view()
+    assert viewer._tile_display_scale == 1.0
+
+
+def test_preview_scale_degrades_only_when_frame_budget_is_missed(app):
+    """The adaptive controller keeps full resolution unless a frame is slow."""
+    from Fractal_Frontier import FRAME_BUDGET_MS
+
+    viewer, _ = app
+
+    scale, slow, fast = viewer._adapt_preview_scale(1.0, FRAME_BUDGET_MS * 0.5, 0, 0)
+    assert scale == 1.0
+    assert (slow, fast) == (0, 0)
+
+    scale, slow, fast = viewer._adapt_preview_scale(1.0, FRAME_BUDGET_MS * 1.2, 0, 0)
+    assert scale == 0.5
+
+    # Several cheap frames are required before climbing back to full.
+    scale = 0.5
+    slow = fast = 0
+    for _ in range(5):
+        scale, slow, fast = viewer._adapt_preview_scale(
+            scale, FRAME_BUDGET_MS * 0.2, slow, fast
+        )
+    assert scale == 1.0
 
 
 def test_fluid_zoom_releases_lock(app):

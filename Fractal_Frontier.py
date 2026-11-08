@@ -40,28 +40,27 @@ WHEEL_COALESCE_MS = 120  # wheel notches merge into one animated zoom
 # only up to this zoom level; deeper views keep the float64 kernel.
 GPU_FLOAT32_MAX_ZOOM = 10.0
 
-# Interactive preview settings.  A pan preview is rendered at quarter
-# resolution over a 3x-viewport region: it costs ~56% of a full viewport
-# render but lets the user pan one full viewport in any direction before a
-# new cache is needed.  A zoom preview is half resolution over exactly the
-# viewport (one quarter of the pixels), since a scale change invalidates the
-# pan cache anyway.
+# Interactive preview settings.  The overscan fallback renders at quarter
+# resolution over a 3x-viewport region when the tile cache is unavailable.
 PAN_PREVIEW_SCALE = 0.25
 PAN_PREVIEW_MARGIN = 1.0
-ZOOM_PREVIEW_SCALE = 0.5
 POLL_MS = 16
 
-# Pan tile cache.  Tiles are full-resolution 128x128 iteration arrays, keyed
-# by an integer grid anchored at the view when a full render settles.  A pan
-# only needs the visible tiles plus one ring of adjacent tiles; the ring is
+# Preview quality is adaptive: start at full resolution and only step down
+# when a measured preview frame misses the 60-fps budget.  Recovery requires
+# several consecutive cheap frames, which avoids oscillating between levels.
+PREVIEW_SCALES = (1.0, 0.5, 0.25)
+FRAME_BUDGET_MS = 1000.0 / 60.0
+FAST_FRAME_FRACTION = 0.4
+FAST_FRAMES_BEFORE_RAISE = 5
+
+# Pan tile cache.  Tiles are full-resolution iteration arrays, keyed by an
+# integer grid anchored at the view when a full render settles.  A pan only
+# needs the visible tiles plus one ring of adjacent tiles; the ring is
 # computed asynchronously in the background so moving towards a missing tile
 # does not freeze the canvas.
 TILE_PX = 128
 TILE_RING = 1
-# Compositing and colour-mapping a full-resolution tile window is the main
-# per-motion cost.  Display a half-resolution slice while dragging; the
-# settled full render restores full detail.
-TILE_DISPLAY_SCALE = 0.5
 
 
 def wheel_factor_from_delta(delta):
@@ -396,6 +395,12 @@ class MandelbrotViewer:
         self._tile_px = None
         self._tile_params = None
         self._tile_pending = set()
+        self._tile_display_scale = 1.0
+        self._tile_slow_streak = 0
+        self._tile_fast_streak = 0
+        self._zoom_preview_scale = 1.0
+        self._zoom_slow_streak = 0
+        self._zoom_fast_streak = 0
         self._render_thread = threading.Thread(target=self._render_worker, daemon=True)
         self._render_thread.start()
         self._poll_results()
@@ -604,7 +609,7 @@ class MandelbrotViewer:
             render_height = max(2, int((self.height + 2 * margin_y) * scale))
             bounds = (cache_x_min, cache_x_max, cache_y_min, cache_y_max)
         elif preview:
-            scale = ZOOM_PREVIEW_SCALE
+            scale = self._zoom_preview_scale
             margin_x = margin_y = 0
             render_width = max(2, int(self.width * scale))
             render_height = max(2, int(self.height * scale))
@@ -954,6 +959,37 @@ class MandelbrotViewer:
             return np.hstack(pieces)
         return apply_color_theme(iterations, max_iterations, theme)
 
+    def _adapt_preview_scale(self, current, frame_ms, slow_streak, fast_streak):
+        """Choose the next preview scale from the measured frame time.
+
+        Lower resolution is used only when a frame misses the 60-fps budget.
+        Raising the resolution requires several consecutive cheap frames so
+        the controller does not oscillate between full and half resolution.
+        """
+        scales = PREVIEW_SCALES
+        try:
+            index = scales.index(current)
+        except ValueError:
+            index = 0
+
+        if frame_ms > FRAME_BUDGET_MS:
+            slow_streak += 1
+            fast_streak = 0
+            if slow_streak >= 1:
+                index = min(len(scales) - 1, index + 1)
+                slow_streak = 0
+        elif frame_ms < FRAME_BUDGET_MS * FAST_FRAME_FRACTION:
+            fast_streak += 1
+            slow_streak = 0
+            if fast_streak >= FAST_FRAMES_BEFORE_RAISE:
+                index = max(0, index - 1)
+                fast_streak = 0
+        else:
+            slow_streak = 0
+            fast_streak = 0
+
+        return scales[index], slow_streak, fast_streak
+
     def _drain_tile_queue(self):
         """Remove queued tile jobs that belong to an invalidated epoch."""
         while True:
@@ -1184,14 +1220,24 @@ class MandelbrotViewer:
         visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
         if not any(key in self._tiles for key in visible):
             return False
+        start = time.perf_counter()
         crop = self._compose_tile_view()
         if crop is None:
             return False
-        if TILE_DISPLAY_SCALE < 1.0:
-            step = max(1, int(round(1.0 / TILE_DISPLAY_SCALE)))
+        scale = self._tile_display_scale
+        if scale < 1.0:
+            step = max(1, int(round(1.0 / scale)))
             crop = crop[::step, ::step]
         rgb = self._colorize(crop, self.max_iterations, self.color_theme)
         self._set_image(rgb, preview=True)
+        frame_ms = (time.perf_counter() - start) * 1000.0
+        (
+            self._tile_display_scale,
+            self._tile_slow_streak,
+            self._tile_fast_streak,
+        ) = self._adapt_preview_scale(
+            scale, frame_ms, self._tile_slow_streak, self._tile_fast_streak
+        )
         return True
 
     def _apply_render(self, seq, full_array, elapsed, params=None):
@@ -1228,6 +1274,7 @@ class MandelbrotViewer:
             return
         self._last_applied_seq = seq
 
+        display_start = time.perf_counter()
         if preview and overscan:
             self._pan_cache = {
                 "array": full_array,
@@ -1255,6 +1302,23 @@ class MandelbrotViewer:
                 full_array, params["max_iterations"], params["color_theme"]
             )
             self._set_image(rgb, preview=preview)
+
+        display_ms = (time.perf_counter() - display_start) * 1000.0
+        if preview and not overscan:
+            # Zoom previews pay both worker compute time and main-thread
+            # colour/display time. Drop resolution only when that frame
+            # misses the target frame budget.
+            frame_ms = elapsed * 1000.0 + display_ms
+            (
+                self._zoom_preview_scale,
+                self._zoom_slow_streak,
+                self._zoom_fast_streak,
+            ) = self._adapt_preview_scale(
+                self._zoom_preview_scale,
+                frame_ms,
+                self._zoom_slow_streak,
+                self._zoom_fast_streak,
+            )
 
         if not current:
             return
