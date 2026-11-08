@@ -64,6 +64,8 @@ Fractal Frontier/            # root of the repository
 ├── fractals.py              # CPU/GPU calculator and backend selection
 ├── gpu_fractals.py          # Numba CUDA kernels and launch configuration
 ├── themes.py                # Colour themes and palette helpers
+├── dd_math.py               # Double-double (quad-float) arithmetic helpers
+├── deep_zoom.py             # Perturbation deep-zoom backend (mpmath references)
 ├── __init__.py              # Public package API (calculator, JIT kernels, themes)
 ├── requirements.txt         # Runtime and development dependencies
 ├── pytest.ini               # Test configuration and warning policy
@@ -77,6 +79,7 @@ Fractal Frontier/            # root of the repository
     ├── test_calculator.py
     ├── test_colors.py
     ├── test_gpu.py
+    ├── test_deep_zoom.py
     ├── test_regressions.py
     ├── test_viewer_functionality.py
     └── test_viewer_integration.py
@@ -93,6 +96,12 @@ The core logic lives in `Fractal_Frontier.py`:
 - **Title metrics** – the window title reports the settled render time with three decimal places and a smoothed preview FPS measured from displayed preview-frame intervals; the status bar keeps backend/coordinate details.
 - **Pan tile cache** – settled full renders return raw iteration counts. The viewer seeds full-resolution tiles from that array and the worker asynchronously precomputes one ring of adjacent tiles (`_tile_queue`). Drags composite cached tiles and colour-map them on the main thread; missing tiles are black until their worker result arrives. Recent tiles outside the active ring are kept in a bounded LRU history (384 tiles) so a quick left/right reversal reuses them. Tiles themselves are never downscaled: preview display starts at full resolution and only steps down to half/quarter after measured frames exceed the frame budget, recovering after several cheap frames.
 - **GPU backend** – `fractals.py` sets `GPU_AVAILABLE` only when a real CUDA device is present (importing numba-cuda alone is not enough). `MandelbrotCalculator._compute_iterations()` falls back to the CPU JIT path if a GPU call fails at runtime, and the viewer syncs its GPU checkbox from the calculator state.
+- **Deep-zoom backends** – float64 pixel coordinates stop resolving detail once the pixel pitch approaches the coordinate ULP (~1e13 magnification; the symptom is flat color plateaus and block seams). Three depth bands, chosen automatically by `MandelbrotViewer._select_precision()` (compare pitch to ULP with a 64-pixel margin, `DEEP_MARGIN`):
+  - `float32`/`float64`: existing GPU/CPU kernels (up to ~1e13).
+  - `double_double`: coordinates carried as (hi, lo) double-double sums (`dd_math.py` helpers, Numba mirrors in `fractals.py`), smooth to ~1e30; CPU-only.
+  - `perturb`: the Deep Zoom Algorithm (`deep_zoom.py`) – a mpmath reference orbit per section plus float64 delta iteration with re-rooting; essentially unbounded depth; CPU-only; Mandelbrot only (deep Julia clamps to double-double, Fatou has no deep kernel).
+  The viewer keeps its view bounds as double-double pairs (`x_min`/`x_min_lo` …); every bound mutation goes through the DD helpers (`_shift_bounds`, `_scale_around`, `_set_bounds`) so deep pan/zoom chains never lose sub-ulp increments. Tile anchors, pan-cache bounds, and bookmarks carry the same (hi, lo) pairs; bookmark JSON stores `x_min_lo` fields (old files default to 0). `mpmath` is a runtime dependency.
+  **Numba pitfall:** the DD kernels must be compiled **without `fastmath=True`** – TwoSum/TwoProd rely on strict IEEE round-to-nearest; fast-math contraction silently destroys the error term. The same applies to any new kernel touching DD arithmetic.
 
 ## Development guidance
 - **Adding a new color theme**: Implement a function with signature `(iterations, max_iterations, colors)` similar to existing ones and register it in `theme_functions`. Update the `self.themes` list if you want it selectable from the UI. The high-resolution themes (Rainbow2, Rainbow3, Rainbow4) build HSV palettes via `_build_hsv_palette()` with 1024/8192 hue steps.

@@ -1,6 +1,6 @@
 # Fractal Frontier
 
-**Version:** 1.3
+**Version:** 1.4
 
 ## Overview
 Fractal Frontier is a graphical application that allows users to explore the Mandelbrot set through an interactive interface. Users can zoom in and out, move the view, and apply different color themes to visualize the fractal patterns.
@@ -16,6 +16,7 @@ Fractal Frontier is a graphical application that allows users to explore the Man
 - Responsive panning using a full-resolution raw-iteration tile cache, an asynchronously computed ring of adjacent tiles, and a bounded LRU history for quick direction reversals.
 - Adaptive preview quality: full-resolution previews when the frame budget allows; half or quarter resolution only when a frame misses the budget.
 - Live performance metrics in the title bar: render time to three decimal places and smoothed preview FPS.
+- Deep-zoom backends that replace float64 arithmetic as the pixel pitch approaches its resolution limit: double-double (quad-float) coordinates extend smooth zooming to ~1e30 magnification, and a perturbation-theory mode (mpmath reference orbits + float64 deltas) goes essentially beyond that. Selection is automatic; the status bar shows the active backend and 30-digit coordinates.
 
 ## Project Structure
 ```
@@ -24,6 +25,8 @@ Fractal Frontier/
 ├── fractals.py                   # CPU/GPU calculator and backend selection
 ├── gpu_fractals.py               # Numba CUDA kernels and launch configuration
 ├── themes.py                     # Colour themes and palette helpers
+├── dd_math.py                    # Double-double (quad-float) arithmetic helpers
+├── deep_zoom.py                  # Perturbation deep-zoom backend (mpmath)
 ├── requirements.txt              # Runtime and development dependencies
 ├── pytest.ini                    # Test configuration and warning policy
 ├── Makefile                      # Environment, test, lint, format, and run targets
@@ -35,6 +38,7 @@ Fractal Frontier/
     ├── test_calculator.py        # Calculator and backend tests
     ├── test_colors.py            # Theme and colour tests
     ├── test_gpu.py               # GPU-specific tests
+    ├── test_deep_zoom.py         # Double-double and perturbation backend tests
     ├── test_regressions.py       # Regression tests for the viewer and calculator
     ├── test_viewer_functionality.py
     └── test_viewer_integration.py

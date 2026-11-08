@@ -104,7 +104,7 @@ class MandelbrotViewer:
             master: Tkinter root window
         """
         self.master = master
-        self.app_name = "Fractal Frontier V1.3"
+        self.app_name = "Fractal Frontier V1.4"
         self._fps = None
         self._last_preview_frame_at = None
         self._title_elapsed = 0.0
