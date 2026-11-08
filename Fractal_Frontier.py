@@ -77,6 +77,14 @@ TILE_RING = 3
 # active tiles are never evicted.
 TILE_CACHE_LIMIT = 384
 
+# Status-bar busy indicator: while a render request is in flight the
+# braille spinner animates with an elapsed-seconds readout, so a deep-zoom
+# frame that takes tens of seconds is visibly working instead of frozen.
+# The animation rides the existing _poll_results loop (main thread only;
+# the worker thread never touches Tk).
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER_PERIOD_MS = 100
+
 
 def wheel_factor_from_delta(delta):
     """Wheel factor for a Tk delta (Windows/macOS): scroll up (positive,
@@ -109,6 +117,13 @@ class MandelbrotViewer:
         self._last_preview_frame_at = None
         self._title_elapsed = 0.0
         self._last_title_update = 0.0
+        # Busy-indicator state: the seq of the in-flight frame request plus
+        # timing for the animated status-bar spinner.
+        self._pending_seq = None
+        self._pending_backend = ""
+        self._render_start_at = None
+        self._spinner_idx = 0
+        self._spinner_next_at = 0.0
         self.width = 160
         self.height = 120
         self.max_iterations = 100
@@ -779,7 +794,22 @@ class MandelbrotViewer:
         except queue.Empty:
             pass
         self._render_queue.put((seq, params))
-        self.status_bar.config(text="Computing…")
+        # Arm the busy indicator; _tick_spinner animates it from the poll
+        # loop, and _poll_results disarms it when this seq's result lands.
+        if precision == "perturb":
+            backend = "Deep CPU (perturbation)"
+        elif precision == "double_double":
+            backend = "Deep CPU (quad-float)"
+        elif use_gpu:
+            backend = f"GPU {precision}"
+        else:
+            backend = f"{num_sections} cores"
+        self._pending_seq = seq
+        self._pending_backend = backend
+        self._render_start_at = time.time()
+        self._spinner_idx = 0
+        self._spinner_next_at = 0.0
+        self.status_bar.config(text=f"Computing {SPINNER_FRAMES[0]} 0.0s | {backend}")
 
     def _render_worker(self):
         """Worker thread loop: compute full/preview frames and cache tiles.
@@ -871,14 +901,40 @@ class MandelbrotViewer:
             dd=(x_min_lo, x_max_lo, y_min_lo, y_max_lo),
         )
 
+    def _tick_spinner(self):
+        """Animate the status-bar busy spinner while a render is in flight.
+
+        Called from the poll loop (main thread only). The elapsed readout
+        doubles as a progress cue for deep-zoom frames that take tens of
+        seconds: a changing ⠋⠙⠹ glyph with a climbing timer means working,
+        not frozen.
+        """
+        if self._pending_seq is None or getattr(self, "_closed", False):
+            return
+        now = time.perf_counter()
+        if now < self._spinner_next_at:
+            return
+        self._spinner_next_at = now + SPINNER_PERIOD_MS / 1000.0
+        self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
+        elapsed = max(0.0, time.time() - (self._render_start_at or time.time()))
+        self.status_bar.config(
+            text=(
+                f"Computing {SPINNER_FRAMES[self._spinner_idx]} "
+                f"{elapsed:.1f}s | {self._pending_backend}"
+            )
+        )
+
     def _poll_results(self):
         """Apply finished renders on the Tk main thread (recurring)."""
+        self._tick_spinner()
         tile_dirty = False
         try:
             while True:
                 kind, payload = self._result_queue.get_nowait()
                 if kind == "done":
                     seq, full_array, elapsed, params = payload
+                    if seq == self._render_seq:
+                        self._pending_seq = None
                     self._apply_render(seq, full_array, elapsed, params)
                 elif kind == "tile":
                     epoch, key, tile_array, bounds = payload
@@ -890,6 +946,8 @@ class MandelbrotViewer:
                         self._tile_pending.discard(key)
                 else:
                     seq, message, params = payload
+                    if seq == self._render_seq:
+                        self._pending_seq = None
                     self._apply_render_error(seq, message)
         except queue.Empty:
             pass

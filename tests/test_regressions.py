@@ -1025,3 +1025,66 @@ def test_clean_shutdown(app):
     viewer.on_close()
     assert not viewer._render_thread.is_alive()
     assert time.time() - t0 < 10
+
+
+# The shared `app` fixture is module-scoped and test_clean_shutdown closes
+# it, so the spinner tests build their own fresh viewer (the spinner state
+# must start clean; a closed viewer's draw_mandelbrot is a no-op).
+@pytest.mark.timeout(30)
+def test_spinner_arms_with_inflight_render():
+    """draw_mandelbrot() arms the busy indicator; the tick animates it."""
+    import tkinter as tk
+
+    from Fractal_Frontier import MandelbrotViewer
+
+    root = tk.Tk()
+    root.withdraw()
+    viewer = MandelbrotViewer(root)
+    try:
+        viewer.draw_mandelbrot()
+        assert viewer._pending_seq == viewer._render_seq, "request not armed"
+        viewer._tick_spinner()
+        first = viewer.status_bar.cget("text")
+        assert "Computing" in first, first
+        # Force the next tick: glyph must advance while the frame is in flight.
+        viewer._spinner_next_at = 0.0
+        viewer._tick_spinner()
+        second = viewer.status_bar.cget("text")
+        assert "Computing" in second, second
+        assert second != first, "spinner glyph did not advance"
+    finally:
+        viewer.on_close()  # destroys the root itself
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+
+@pytest.mark.timeout(30)
+def test_spinner_disarms_when_the_render_lands():
+    """The settled frame replaces the spinner text; pending clears."""
+    import tkinter as tk
+
+    from Fractal_Frontier import MandelbrotViewer
+
+    root = tk.Tk()
+    root.withdraw()
+    viewer = MandelbrotViewer(root)
+    try:
+        viewer.draw_mandelbrot()
+        deadline = time.time() + 15
+        while viewer._pending_seq is not None and time.time() < deadline:
+            root.update()
+            time.sleep(0.02)
+        assert viewer._pending_seq is None, "render never settled"
+        assert "Computing" not in viewer.status_bar.cget("text")
+        # Tick with nothing pending must be inert.
+        text = viewer.status_bar.cget("text")
+        viewer._tick_spinner()
+        assert viewer.status_bar.cget("text") == text
+    finally:
+        viewer.on_close()  # destroys the root itself
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
