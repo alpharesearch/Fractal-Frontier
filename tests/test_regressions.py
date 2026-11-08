@@ -719,9 +719,9 @@ def test_pool_is_capped_at_section_limit(app):
 
 
 def test_pan_preview_cache_is_cropped_without_recompute(app):
-    """The pan preview renders an overscan region; a small drag must be
-    served by cropping that cached image instead of requesting a full
-    render for every motion event."""
+    """The pan preview renders an overscan region of raw iterations; a small
+    drag must be served by cropping it instead of requesting a full render
+    for every motion event."""
     viewer, root = app
     viewer.width, viewer.height = 160, 120
     viewer.x_min, viewer.x_max = -2.0, 1.0
@@ -736,7 +736,7 @@ def test_pan_preview_cache_is_cropped_without_recompute(app):
             time.sleep(0.02)
         assert viewer._pan_cache is not None, "no pan cache was stored"
         crop = viewer._cache_crop_for_current_view()
-        assert crop is not None and crop.ndim == 3 and crop.size > 0
+        assert crop is not None and crop.ndim == 2 and crop.size > 0
 
         class PtEv:
             type = "4"
@@ -761,6 +761,128 @@ def test_pan_preview_cache_is_cropped_without_recompute(app):
         viewer.x_min, viewer.x_max = -2.0, 1.0
         viewer.y_min, viewer.y_max = -1.125, 1.125
         viewer.draw_mandelbrot()
+
+
+@pytest.fixture
+def tile_view(app):
+    """Set up a view large enough to seed complete tiles, then restore it."""
+    viewer, root = app
+    saved = (
+        viewer.width,
+        viewer.height,
+        viewer.x_min,
+        viewer.x_max,
+        viewer.y_min,
+        viewer.y_max,
+        viewer.zoom_level,
+        viewer.color_theme,
+        viewer.max_iterations,
+    )
+    viewer.width, viewer.height = 300, 200
+    viewer.x_min, viewer.x_max = -2.0, 1.0
+    viewer.y_min, viewer.y_max = -1.0, 1.0
+    viewer.zoom_level = 1.0
+    viewer.draw_mandelbrot()
+    assert _wait_for_render(viewer, root), "tile setup render did not complete"
+    try:
+        yield viewer, root
+    finally:
+        viewer._interacting = False
+        viewer._interaction_mode = None
+        viewer._panning = False
+        viewer._pan_start = None
+        viewer._pan_last = None
+        (
+            viewer.width,
+            viewer.height,
+            viewer.x_min,
+            viewer.x_max,
+            viewer.y_min,
+            viewer.y_max,
+            viewer.zoom_level,
+            viewer.color_theme,
+            viewer.max_iterations,
+        ) = saved
+        viewer.draw_mandelbrot()
+        _wait_for_render(viewer, root)
+
+
+def test_full_render_seeds_tile_cache(tile_view):
+    """A settled render seeds full-resolution tiles and requests a ring."""
+    viewer, _ = tile_view
+    assert viewer._tile_cache_is_valid()
+    assert viewer._tiles, "no complete tiles were seeded"
+    assert viewer._tile_pending, "no surrounding ring was requested"
+    crop = viewer._compose_tile_view()
+    assert crop is not None and crop.ndim == 2 and crop.size > 0
+
+
+def test_tile_ring_is_computed_asynchronously(tile_view):
+    """The worker fills the adjacent ring while the main thread stays free."""
+    viewer, root = tile_view
+    seeded = len(viewer._tiles)
+    deadline = time.time() + 6.0
+    while time.time() < deadline and viewer._tile_pending:
+        root.update()
+        time.sleep(0.02)
+    assert not viewer._tile_pending, "ring tiles never finished"
+    assert len(viewer._tiles) > seeded, "ring tiles were not stored"
+    assert viewer._display_tile_view()
+
+
+def test_pan_uses_tile_cache_without_full_render(tile_view):
+    """A drag served by cached tiles must not enqueue a frame render."""
+    viewer, root = tile_view
+
+    class PtEv:
+        type = "4"
+
+        def __init__(self, x, y, widget):
+            self.x, self.y, self.widget = x, y, widget
+
+    seq_before = viewer._render_seq
+    viewer._pan_start = (150, 100)
+    viewer._pan_last = (150, 100)
+    viewer._panning = True
+    viewer._pan_motion(PtEv(190, 100, root))
+    assert viewer._render_seq == seq_before + 1
+    assert viewer._render_queue.empty(), "pan requested a full frame render"
+    assert viewer._display_tile_view()
+    needed = viewer._tile_index_range(
+        viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max, ring=1
+    )
+    assert set(viewer._tiles) <= needed, "tiles outside the ring were kept"
+    viewer._pan_release(PtEv(190, 100, root))
+
+
+def test_tile_cache_is_theme_independent_but_zoom_dependent(tile_view):
+    """Tiles hold raw iterations, so theme changes reuse them; zoom does not."""
+    viewer, _ = tile_view
+    assert viewer._tile_cache_is_valid()
+    viewer.color_theme = "Grayscale"
+    assert viewer._tile_cache_is_valid()
+    if not viewer._display_tile_view():
+        print(
+            "DEBUG",
+            viewer._tiles,
+            viewer._tile_index_range(
+                viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max
+            ),
+            viewer._tile_cache_is_valid(),
+            viewer._tile_params,
+            viewer._tile_anchor_x,
+            viewer._tile_anchor_y,
+            viewer._tile_world,
+        )
+    assert viewer._display_tile_view()
+
+    viewer.max_iterations += 1
+    assert not viewer._tile_cache_is_valid()
+    viewer.max_iterations -= 1
+    assert viewer._tile_cache_is_valid()
+
+    viewer.zoom_level *= 2.0
+    assert not viewer._tile_cache_is_valid()
 
 
 def test_fluid_zoom_releases_lock(app):

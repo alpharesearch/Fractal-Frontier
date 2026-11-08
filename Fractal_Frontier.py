@@ -51,6 +51,18 @@ PAN_PREVIEW_MARGIN = 1.0
 ZOOM_PREVIEW_SCALE = 0.5
 POLL_MS = 16
 
+# Pan tile cache.  Tiles are full-resolution 128x128 iteration arrays, keyed
+# by an integer grid anchored at the view when a full render settles.  A pan
+# only needs the visible tiles plus one ring of adjacent tiles; the ring is
+# computed asynchronously in the background so moving towards a missing tile
+# does not freeze the canvas.
+TILE_PX = 128
+TILE_RING = 1
+# Compositing and colour-mapping a full-resolution tile window is the main
+# per-motion cost.  Display a half-resolution slice while dragging; the
+# settled full render restores full detail.
+TILE_DISPLAY_SCALE = 0.5
+
 
 def wheel_factor_from_delta(delta):
     """Wheel factor for a Tk delta (Windows/macOS): scroll up (positive,
@@ -360,6 +372,7 @@ class MandelbrotViewer:
         # hands finished results back through a plain queue that the main
         # thread polls periodically.
         self._render_queue = queue.Queue()
+        self._tile_queue = queue.Queue()
         self._result_queue = queue.Queue()
         self._render_seq = 0
         self._last_applied_seq = 0
@@ -367,11 +380,22 @@ class MandelbrotViewer:
         self._image_item = None
         # Interaction state: previews are shown while the user drags or
         # animates a zoom, then a full-resolution render is requested when
-        # the interaction settles.  The pan cache is a rendered preview that
-        # covers the viewport plus a one-viewport margin on every side.
+        # the interaction settles.
         self._interacting = False
         self._interaction_mode = None  # "pan" or "zoom"
         self._pan_cache = None
+
+        # Raw iteration tile cache for panning.  It is seeded from every
+        # settled full-resolution render, then extended in a ring by the
+        # worker thread.  `_tile_epoch` invalidates results from old zooms.
+        self._tiles = {}
+        self._tile_epoch = 0
+        self._tile_anchor_x = None
+        self._tile_anchor_y = None
+        self._tile_world = None
+        self._tile_px = None
+        self._tile_params = None
+        self._tile_pending = set()
         self._render_thread = threading.Thread(target=self._render_worker, daemon=True)
         self._render_thread.start()
         self._poll_results()
@@ -632,15 +656,47 @@ class MandelbrotViewer:
         self.status_bar.config(text="Computing…")
 
     def _render_worker(self):
-        """Worker thread loop: compute renders and hand results back.
+        """Worker thread loop: compute full/preview frames and cache tiles.
+
+        Frame jobs are checked first so a settled full render is not delayed
+        by background ring tiles.  Tile jobs are computed one at a time and
+        returned immediately, so the visible cache can fill progressively.
 
         Deliberately makes NO Tk calls: tkinter objects are not thread-safe,
         so results are queued for the main thread's poller instead.
         """
         while True:
-            job = self._render_queue.get()
+            job = None
+            try:
+                job = self._render_queue.get_nowait()
+            except queue.Empty:
+                try:
+                    job = self._tile_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
             if job is None:  # shutdown sentinel
                 break
+
+            if isinstance(job, tuple) and job[0] == "tile":
+                _, epoch, key, bounds, meta = job
+                if epoch != self._tile_epoch:
+                    continue  # zoom/render epoch changed; stale tile
+                # A long drag can leave tiles from an older window queued.
+                # Skip them without doing fractal work.
+                needed = self._tile_index_range(
+                    self.x_min, self.x_max, self.y_min, self.y_max, ring=TILE_RING
+                )
+                if key not in needed:
+                    continue
+                try:
+                    tile_array = self._compute_tile(meta, bounds)
+                except Exception as exc:  # never kill the worker thread
+                    print(f"Tile error (epoch {epoch}, key {key}): {exc!r}")
+                    self._result_queue.put(("tile_error", (epoch, key)))
+                    continue
+                self._result_queue.put(("tile", (epoch, key, tile_array, bounds)))
+                continue
+
             seq, params = job
             start_time = time.time()
             try:
@@ -652,19 +708,55 @@ class MandelbrotViewer:
             elapsed = time.time() - start_time
             self._result_queue.put(("done", (seq, full_array, elapsed, params)))
 
+    def _compute_tile(self, meta, bounds):
+        """Compute one raw iteration tile (worker thread)."""
+        # If a previous GPU call already fell back to CPU, do not try the GPU
+        # again for every queued tile.
+        use_gpu = meta["use_gpu"] and bool(MandelbrotCalculator._use_gpu)
+        MandelbrotCalculator.set_use_gpu(use_gpu)
+        fractal_type = meta["fractal_type"].lower()
+        c = meta["julia_c"] if meta["fractal_type"] == "Julia" else None
+        x_min, x_max, y_min, y_max = bounds
+        tile_px = meta["tile_px"]
+        return self.calculator.calculate_full(
+            fractal_type,
+            tile_px,
+            tile_px,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            meta["max_iterations"],
+            None,
+            c=c,
+            precision=meta["precision"],
+        )
+
     def _poll_results(self):
         """Apply finished renders on the Tk main thread (recurring)."""
+        tile_dirty = False
         try:
             while True:
                 kind, payload = self._result_queue.get_nowait()
                 if kind == "done":
                     seq, full_array, elapsed, params = payload
                     self._apply_render(seq, full_array, elapsed, params)
+                elif kind == "tile":
+                    epoch, key, tile_array, bounds = payload
+                    if self._apply_tile(epoch, key, tile_array):
+                        tile_dirty = True
+                elif kind == "tile_error":
+                    epoch, key = payload
+                    if epoch == self._tile_epoch:
+                        self._tile_pending.discard(key)
                 else:
                     seq, message, params = payload
                     self._apply_render_error(seq, message)
         except queue.Empty:
             pass
+        # Re-composite at most once per poll, not once per tile result.
+        if tile_dirty and self._interacting and self._interaction_mode == "pan":
+            self._display_tile_view()
         if not self._closed:
             try:
                 # Poll often enough to display preview frames during an
@@ -674,41 +766,25 @@ class MandelbrotViewer:
                 pass  # root window was destroyed
 
     def _compute_full(self, params):
-        """Compute the full RGB image for one render request (worker thread)."""
+        """Compute raw iteration counts for one render request (worker thread)."""
         fractal_type = params["fractal_type"]
         width, height = params["width"], params["height"]
         x_min, x_max = params["x_min"], params["x_max"]
         y_min, y_max = params["y_min"], params["y_max"]
         max_iterations = params["max_iterations"]
-        theme = params["color_theme"]
         num_sections = params["num_sections"]
         section_widths = params["section_widths"]
         use_gpu = params["use_gpu"]
         precision = params.get("precision", "float64")
 
         MandelbrotCalculator.set_use_gpu(use_gpu)
-        is_cpu_cores_theme = theme == self.CPU_CORES_THEME
         julia_c = params["julia_c"] if fractal_type == "Julia" else None
 
         if use_gpu:
             # GPU mode: one kernel for the whole image (no multiprocessing).
-            if not is_cpu_cores_theme:
-                return self.calculator.calculate_full(
-                    fractal_type.lower(),
-                    width,
-                    height,
-                    x_min,
-                    x_max,
-                    y_min,
-                    y_max,
-                    max_iterations,
-                    theme,
-                    c=julia_c,
-                    precision=precision,
-                )
-            # "CPU Cores" theme on GPU: compute iterations once, then apply a
-            # random theme per vertical section (mirrors the CPU behaviour).
-            iterations = self.calculator.calculate_full(
+            # Raw iterations are returned; colour mapping happens on the main
+            # thread so the result is also usable as the source of pan tiles.
+            return self.calculator.calculate_full(
                 fractal_type.lower(),
                 width,
                 height,
@@ -721,17 +797,6 @@ class MandelbrotViewer:
                 c=julia_c,
                 precision=precision,
             )
-            pieces = []
-            offset = 0
-            for i in range(num_sections):
-                piece = iterations[:, offset : offset + section_widths[i]]
-                pieces.append(
-                    apply_color_theme(
-                        piece, max_iterations, random.choice(self._theme_choices)
-                    )
-                )
-                offset += section_widths[i]
-            return np.hstack(pieces)
 
         # CPU mode: use multiprocessing with sections. Each task carries its
         # first column (offset), so sections may have different widths; the
@@ -739,10 +804,7 @@ class MandelbrotViewer:
         # the canvas (integer division used to leave a black strip).
         #
         # Workers return raw iteration counts, not RGB.  Colour mapping is a
-        # single pass over the whole image afterwards, which avoids doing the
-        # palette work (and the boolean-mask work) once per section.  For the
-        # "CPU Cores" theme the colour pass is still done per section because
-        # each section deliberately gets a different random theme.
+        # single pass over the whole image afterwards.
         tasks = []
         offset = 0
         for i in range(num_sections):
@@ -779,22 +841,7 @@ class MandelbrotViewer:
         else:
             raise ValueError(f"Unknown fractal type: {fractal_type!r}")
 
-        iterations = np.hstack(section_arrays)
-
-        if is_cpu_cores_theme:
-            pieces = []
-            offset = 0
-            for i in range(num_sections):
-                piece = iterations[:, offset : offset + section_widths[i]]
-                pieces.append(
-                    apply_color_theme(
-                        piece, max_iterations, random.choice(self._theme_choices)
-                    )
-                )
-                offset += section_widths[i]
-            return np.hstack(pieces)
-
-        return apply_color_theme(iterations, max_iterations, theme)
+        return np.hstack(section_arrays)
 
     def _set_image(self, array, preview=False):
         """Build one PhotoImage from an RGB array and update the canvas item.
@@ -805,7 +852,12 @@ class MandelbrotViewer:
         """
         image = Image.fromarray(array, mode="RGB")
         if image.size != (self.width, self.height):
-            image = image.resize((self.width, self.height), Image.Resampling.BILINEAR)
+            # Preview frames are upscaled at interaction rate; nearest-neighbour
+            # keeps that cheap. Settled frames are already canvas-sized.
+            resample = (
+                Image.Resampling.NEAREST if preview else Image.Resampling.BILINEAR
+            )
+            image = image.resize((self.width, self.height), resample)
         self.photo = ImageTk.PhotoImage(image)
         # Keep exactly one canvas image item; update it in place instead of
         # stacking a new item (and a new Tcl image) on every redraw.
@@ -825,8 +877,8 @@ class MandelbrotViewer:
         cache = self._pan_cache
         if cache is None:
             return False
-        if cache["theme"] != self.color_theme:
-            return False
+        # The cache holds raw iterations; the theme is applied at display
+        # time, so a theme change does not invalidate it.
         if cache["max_iterations"] != self.max_iterations:
             return False
         if cache["fractal_type"] != self.fractal_type_var.get():
@@ -869,11 +921,277 @@ class MandelbrotViewer:
         return crop if crop.size else None
 
     def _display_cached_pan(self):
-        """Display the cached preview for the current view without computing."""
+        """Display the cached preview for the current view without computing.
+
+        The cache stores raw iterations, so the current theme is applied at
+        display time rather than baked into the cached pixels.
+        """
         crop = self._cache_crop_for_current_view()
         if crop is None:
             return False
-        self._set_image(crop, preview=True)
+        rgb = self._colorize(crop, self.max_iterations, self.color_theme)
+        self._set_image(rgb, preview=True)
+        return True
+
+    def _colorize(self, iterations, max_iterations, theme):
+        """Apply a theme on the main thread (also used for cached tiles)."""
+        if theme == self.CPU_CORES_THEME:
+            width = iterations.shape[1]
+            num_sections = max(1, min(self.num_cores, 32, width))
+            base = width // num_sections
+            widths = [base] * num_sections
+            widths[-1] += width - base * num_sections
+            pieces = []
+            offset = 0
+            for section_width in widths:
+                piece = iterations[:, offset : offset + section_width]
+                pieces.append(
+                    apply_color_theme(
+                        piece, max_iterations, random.choice(self._theme_choices)
+                    )
+                )
+                offset += section_width
+            return np.hstack(pieces)
+        return apply_color_theme(iterations, max_iterations, theme)
+
+    def _drain_tile_queue(self):
+        """Remove queued tile jobs that belong to an invalidated epoch."""
+        while True:
+            try:
+                self._tile_queue.get_nowait()
+            except queue.Empty:
+                return
+
+    def _invalidate_tile_cache(self):
+        """Discard the tile cache and any queued tile jobs."""
+        self._tile_epoch += 1
+        self._tiles = {}
+        self._tile_pending = set()
+        self._tile_anchor_x = None
+        self._tile_anchor_y = None
+        self._tile_world = None
+        self._tile_px = None
+        self._tile_params = None
+        self._drain_tile_queue()
+
+    def _start_tile_cache(self, raw, params):
+        """Seed a pan tile cache from a settled full-resolution render."""
+        view_w, view_h = params["width"], params["height"]
+        x_range = params["x_max"] - params["x_min"]
+        if view_w <= 0 or view_h <= 0 or x_range <= 0:
+            return
+
+        self._tile_epoch += 1
+        self._tiles = {}
+        self._tile_pending = set()
+        self._drain_tile_queue()
+        self._pan_cache = None
+
+        tile_px = min(TILE_PX, view_w, view_h)
+        self._tile_px = tile_px
+        self._tile_anchor_x = params["x_min"]
+        self._tile_anchor_y = params["y_min"]
+        self._tile_world = tile_px / view_w * x_range
+        self._tile_params = {
+            "fractal_type": params["fractal_type"],
+            "max_iterations": params["max_iterations"],
+            "julia_c": params["julia_c"],
+            "zoom_level": params["zoom_level"],
+            "precision": params["precision"],
+            "view_width": view_w,
+            "view_height": view_h,
+            "tile_px": tile_px,
+        }
+
+        # Complete tiles are exact tile_px x tile_px slices of the full render.
+        # Partial tiles at the right/bottom edge are requested from the worker.
+        max_i = view_w // tile_px
+        max_j = view_h // tile_px
+        for j in range(max_j):
+            row0 = j * tile_px
+            row1 = row0 + tile_px
+            for i in range(max_i):
+                col0 = i * tile_px
+                col1 = col0 + tile_px
+                self._tiles[(i, j)] = raw[row0:row1, col0:col1].copy()
+
+        # Precompute one ring around the viewport in the background.
+        self._request_tiles_for_view()
+
+    def _tile_cache_is_valid(self):
+        """True if the tile grid matches the current fractal/zoom/view."""
+        params = self._tile_params
+        if params is None or self._tile_world is None or self._tile_px is None:
+            return False
+        if params["fractal_type"] != self.fractal_type_var.get():
+            return False
+        if params["max_iterations"] != self.max_iterations:
+            return False
+        if params["julia_c"] != self.julia_c:
+            return False
+        if params["view_width"] != self.width or params["view_height"] != self.height:
+            return False
+        if params["tile_px"] != self._tile_px:
+            return False
+        zoom = self.zoom_level
+        return abs(params["zoom_level"] - zoom) <= 1e-9 * max(1.0, abs(zoom))
+
+    def _tile_index_range(self, x0, x1, y0, y1, ring=0):
+        """Return tile keys intersecting a world-space rectangle."""
+        tw = self._tile_world
+        if tw is None or tw <= 0:
+            return set()
+        ax, ay = self._tile_anchor_x, self._tile_anchor_y
+        i0 = int(math.floor((x0 - ax) / tw))
+        i1 = int(math.ceil((x1 - ax) / tw)) - 1
+        j0 = int(math.floor((y0 - ay) / tw))
+        j1 = int(math.ceil((y1 - ay) / tw)) - 1
+        if i1 < i0:
+            i1 = i0
+        if j1 < j0:
+            j1 = j0
+        i0 -= ring
+        i1 += ring
+        j0 -= ring
+        j1 += ring
+        return {(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)}
+
+    def _tile_bounds(self, key):
+        """Full world bounds of one tile."""
+        i, j = key
+        x0 = self._tile_anchor_x + i * self._tile_world
+        y0 = self._tile_anchor_y + j * self._tile_world
+        return (x0, x0 + self._tile_world, y0, y0 + self._tile_world)
+
+    def _request_tile(self, key):
+        """Queue one missing tile for the worker."""
+        if key in self._tiles or key in self._tile_pending:
+            return
+        self._tile_pending.add(key)
+        meta = dict(self._tile_params)
+        meta["use_gpu"] = self.use_gpu
+        self._tile_queue.put(
+            ("tile", self._tile_epoch, key, self._tile_bounds(key), meta)
+        )
+
+    def _request_tiles_for_view(self):
+        """Queue visible missing tiles first, then the surrounding ring."""
+        if self._tile_params is None:
+            return
+        visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
+        ring = self._tile_index_range(
+            self.x_min, self.x_max, self.y_min, self.y_max, ring=TILE_RING
+        )
+        # Keep only the current window; a long drag must not accumulate
+        # every tile it has ever visited.
+        keep = visible | ring
+        for key in list(self._tiles):
+            if key not in keep:
+                del self._tiles[key]
+        self._tile_pending &= keep
+
+        cx = (self.x_min + self.x_max) / 2
+        cy = (self.y_min + self.y_max) / 2
+        tw = self._tile_world
+
+        def distance(key):
+            i, j = key
+            tx = self._tile_anchor_x + (i + 0.5) * tw
+            ty = self._tile_anchor_y + (j + 0.5) * tw
+            return (tx - cx) ** 2 + (ty - cy) ** 2
+
+        for key in sorted(visible, key=distance):
+            self._request_tile(key)
+        for key in sorted(ring - visible, key=distance):
+            self._request_tile(key)
+
+    def _tile_intersects_view(self, key):
+        x0, x1, y0, y1 = self._tile_bounds(key)
+        return not (
+            x1 <= self.x_min or x0 >= self.x_max or y1 <= self.y_min or y0 >= self.y_max
+        )
+
+    def _apply_tile(self, epoch, key, tile_array):
+        """Store a worker tile; return True if it touches the current view."""
+        if epoch != self._tile_epoch:
+            return False
+        self._tile_pending.discard(key)
+        if key in self._tiles:
+            return False
+        needed = self._tile_index_range(
+            self.x_min, self.x_max, self.y_min, self.y_max, ring=TILE_RING
+        )
+        if key not in needed:
+            return False
+        self._tiles[key] = tile_array
+        # A tile failure can also be the first place the GPU fallback is
+        # observed; keep the checkbox in sync.
+        if (
+            self.gpu_var is not None
+            and bool(MandelbrotCalculator._use_gpu) != self.use_gpu
+        ):
+            self.use_gpu = bool(MandelbrotCalculator._use_gpu)
+            self.gpu_var.set(self.use_gpu)
+        return self._tile_intersects_view(key)
+
+    def _compose_tile_view(self):
+        """Composite available tiles into a raw array covering the view."""
+        if not self._tile_cache_is_valid():
+            return None
+        visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
+        if not visible:
+            return None
+
+        tile_px = self._tile_px
+        i0 = min(i for i, _ in visible)
+        i1 = max(i for i, _ in visible)
+        j0 = min(j for _, j in visible)
+        j1 = max(j for _, j in visible)
+        comp_w = (i1 - i0 + 1) * tile_px
+        comp_h = (j1 - j0 + 1) * tile_px
+        missing = self.max_iterations
+        comp = np.full((comp_h, comp_w), missing, dtype=np.int32)
+
+        for j in range(j0, j1 + 1):
+            for i in range(i0, i1 + 1):
+                tile = self._tiles.get((i, j))
+                if tile is None or tile.shape != (tile_px, tile_px):
+                    continue
+                row = (j - j0) * tile_px
+                col = (i - i0) * tile_px
+                comp[row : row + tile_px, col : col + tile_px] = tile
+
+        tw = self._tile_world
+        comp_x0 = self._tile_anchor_x + i0 * tw
+        comp_x1 = self._tile_anchor_x + (i1 + 1) * tw
+        comp_y0 = self._tile_anchor_y + j0 * tw
+        comp_y1 = self._tile_anchor_y + (j1 + 1) * tw
+        fx0 = (self.x_min - comp_x0) / (comp_x1 - comp_x0) * comp_w
+        fx1 = (self.x_max - comp_x0) / (comp_x1 - comp_x0) * comp_w
+        fy0 = (self.y_min - comp_y0) / (comp_y1 - comp_y0) * comp_h
+        fy1 = (self.y_max - comp_y0) / (comp_y1 - comp_y0) * comp_h
+        col0 = max(0, min(comp_w - 1, int(math.floor(fx0))))
+        col1 = max(col0 + 1, min(comp_w, int(math.ceil(fx1))))
+        row0 = max(0, min(comp_h - 1, int(math.floor(fy0))))
+        row1 = max(row0 + 1, min(comp_h, int(math.ceil(fy1))))
+        crop = comp[row0:row1, col0:col1]
+        return crop if crop.size else None
+
+    def _display_tile_view(self):
+        """Display the cached-tile composite for the current view."""
+        if not self._tile_cache_is_valid():
+            return False
+        visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
+        if not any(key in self._tiles for key in visible):
+            return False
+        crop = self._compose_tile_view()
+        if crop is None:
+            return False
+        if TILE_DISPLAY_SCALE < 1.0:
+            step = max(1, int(round(1.0 / TILE_DISPLAY_SCALE)))
+            crop = crop[::step, ::step]
+        rgb = self._colorize(crop, self.max_iterations, self.color_theme)
+        self._set_image(rgb, preview=True)
         return True
 
     def _apply_render(self, seq, full_array, elapsed, params=None):
@@ -914,7 +1232,6 @@ class MandelbrotViewer:
             self._pan_cache = {
                 "array": full_array,
                 "bounds": params["cache_bounds"],
-                "theme": params["color_theme"],
                 "max_iterations": params["max_iterations"],
                 "fractal_type": params["fractal_type"],
                 "julia_c": params["julia_c"],
@@ -922,13 +1239,22 @@ class MandelbrotViewer:
             }
             crop = self._cache_crop_for_current_view()
             if crop is not None:
-                self._set_image(crop, preview=True)
+                rgb = self._colorize(
+                    crop, params["max_iterations"], params["color_theme"]
+                )
+                self._set_image(rgb, preview=True)
             elif current:
-                self._set_image(full_array, preview=True)
+                rgb = self._colorize(
+                    full_array, params["max_iterations"], params["color_theme"]
+                )
+                self._set_image(rgb, preview=True)
             else:
                 return
         else:
-            self._set_image(full_array, preview=preview)
+            rgb = self._colorize(
+                full_array, params["max_iterations"], params["color_theme"]
+            )
+            self._set_image(rgb, preview=preview)
 
         if not current:
             return
@@ -944,6 +1270,12 @@ class MandelbrotViewer:
         ):
             self.use_gpu = bool(MandelbrotCalculator._use_gpu)
             self.gpu_var.set(self.use_gpu)
+
+        # A settled full render covers exactly the viewport.  Seed the pan
+        # tile cache from its raw iterations, then request the surrounding
+        # ring in the background.
+        if not preview:
+            self._start_tile_cache(full_array, params)
 
         # Preview frames leave the status bar on "Computing…"; updating the
         # layout at interaction rate can resize the canvas and make the drag
@@ -991,6 +1323,7 @@ class MandelbrotViewer:
         if render_thread is not None:
             try:
                 self._render_queue.put(None)  # shutdown sentinel
+                self._tile_queue.put(None)
                 render_thread.join(timeout=5)
             except Exception:
                 pass
@@ -1230,6 +1563,7 @@ class MandelbrotViewer:
             return
 
         self.is_zooming = True
+        self._invalidate_tile_cache()
         try:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
@@ -1291,9 +1625,10 @@ class MandelbrotViewer:
         self.is_zooming = True
         self._interacting = True
         self._interaction_mode = "zoom"
-        # A scale change invalidates the pan cache: its pixels correspond
-        # to the old zoom level.
+        # A scale change invalidates both the pan cache and the tile grid:
+        # their pixels correspond to the old zoom level.
         self._pan_cache = None
+        self._invalidate_tile_cache()
         try:
             width = self.x_max - self.x_min
             height = self.y_max - self.y_min
@@ -1400,9 +1735,20 @@ class MandelbrotViewer:
         if self._image_item is not None:
             self.canvas.move(self._image_item, dx, dy)
 
-        if self._display_cached_pan():
-            # The cache already covers this view. Invalidate any older
-            # pending render so it cannot overwrite the crop.
+        if self._tile_cache_is_valid():
+            # Full-resolution tiles are available for the visible area.
+            # Request missing visible tiles first and the ring behind them;
+            # the composite is refreshed when tile results arrive.
+            self._request_tiles_for_view()
+            self._display_tile_view()
+            self._render_seq += 1
+            try:
+                self._render_queue.get_nowait()
+            except queue.Empty:
+                pass
+        elif self._display_cached_pan():
+            # Fallback for a missing/invalid tile cache: the overscan
+            # preview already covers this view.
             self._render_seq += 1
             try:
                 self._render_queue.get_nowait()
