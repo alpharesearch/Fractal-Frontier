@@ -855,6 +855,25 @@ def test_pan_uses_tile_cache_without_full_render(tile_view):
     viewer._pan_release(PtEv(190, 100, root))
 
 
+def test_tile_cache_retains_recent_tiles_for_reversal(tile_view):
+    """A quick pan out and back reuses retained tiles instead of recomputing."""
+    viewer, _ = tile_view
+    assert viewer._tile_cache_is_valid()
+    old_key = next(iter(viewer._tiles))
+    saved = (viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max)
+
+    shift = 5 * viewer._tile_world
+    viewer.x_min -= shift
+    viewer.x_max -= shift
+    viewer._request_tiles_for_view()
+    assert old_key in viewer._tiles, "recent tile was evicted during the pan"
+
+    viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max = saved
+    viewer._request_tiles_for_view()
+    assert old_key in viewer._tiles
+    assert old_key not in viewer._tile_pending
+
+
 def test_tile_cache_is_theme_independent_but_zoom_dependent(tile_view):
     """Tiles hold raw iterations, so theme changes reuse them; zoom does not."""
     viewer, _ = tile_view

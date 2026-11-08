@@ -15,6 +15,7 @@ import random
 import threading
 import time
 import tkinter as tk
+from collections import OrderedDict
 from tkinter import messagebox, ttk
 
 import numpy as np
@@ -47,10 +48,10 @@ PAN_PREVIEW_MARGIN = 1.0
 POLL_MS = 16
 
 # Preview quality is adaptive: start at full resolution and only step down
-# when a measured preview frame misses the 60-fps budget.  Recovery requires
+# when a measured preview frame misses the 24-fps budget.  Recovery requires
 # several consecutive cheap frames, which avoids oscillating between levels.
 PREVIEW_SCALES = (1.0, 0.5, 0.25)
-FRAME_BUDGET_MS = 1000.0 / 60.0
+FRAME_BUDGET_MS = 1000.0 / 24.0
 FAST_FRAME_FRACTION = 0.4
 FAST_FRAMES_BEFORE_RAISE = 5
 
@@ -59,8 +60,12 @@ FAST_FRAMES_BEFORE_RAISE = 5
 # needs the visible tiles plus one ring of adjacent tiles; the ring is
 # computed asynchronously in the background so moving towards a missing tile
 # does not freeze the canvas.
-TILE_PX = 128
-TILE_RING = 1
+TILE_PX = 256
+TILE_RING = 3
+# Retain recently-used tiles outside the active ring so a quick left/right
+# reversal can reuse them instead of recomputing. The cap is a tile count;
+# active tiles are never evicted.
+TILE_CACHE_LIMIT = 384
 
 
 def wheel_factor_from_delta(delta):
@@ -391,7 +396,7 @@ class MandelbrotViewer:
         # Raw iteration tile cache for panning.  It is seeded from every
         # settled full-resolution render, then extended in a ring by the
         # worker thread.  `_tile_epoch` invalidates results from old zooms.
-        self._tiles = {}
+        self._tiles = OrderedDict()
         self._tile_epoch = 0
         self._tile_anchor_x = None
         self._tile_anchor_y = None
@@ -1005,7 +1010,7 @@ class MandelbrotViewer:
     def _invalidate_tile_cache(self):
         """Discard the tile cache and any queued tile jobs."""
         self._tile_epoch += 1
-        self._tiles = {}
+        self._tiles = OrderedDict()
         self._tile_pending = set()
         self._tile_anchor_x = None
         self._tile_anchor_y = None
@@ -1022,7 +1027,7 @@ class MandelbrotViewer:
             return
 
         self._tile_epoch += 1
-        self._tiles = {}
+        self._tiles = OrderedDict()
         self._tile_pending = set()
         self._drain_tile_queue()
         self._pan_cache = None
@@ -1122,10 +1127,18 @@ class MandelbrotViewer:
         ring = self._tile_index_range(
             self.x_min, self.x_max, self.y_min, self.y_max, ring=TILE_RING
         )
-        # Keep only the current window; a long drag must not accumulate
-        # every tile it has ever visited.
+        # Keep the active window plus a bounded LRU history.  A quick
+        # reversal across the edge of the ring then reuses tiles instead of
+        # recomputing them.  Active tiles are never evicted; only the least
+        # recently used non-active tiles are dropped when the cache is full.
         keep = visible | ring
+        for key in visible:
+            if key in self._tiles:
+                self._tiles.move_to_end(key)
+        limit = max(TILE_CACHE_LIMIT, len(keep))
         for key in list(self._tiles):
+            if len(self._tiles) <= limit:
+                break
             if key not in keep:
                 del self._tiles[key]
         self._tile_pending &= keep
@@ -1224,6 +1237,9 @@ class MandelbrotViewer:
         visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
         if not any(key in self._tiles for key in visible):
             return False
+        for key in visible:
+            if key in self._tiles:
+                self._tiles.move_to_end(key)
         start = time.perf_counter()
         crop = self._compose_tile_view()
         if crop is None:
