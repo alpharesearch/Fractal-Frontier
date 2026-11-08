@@ -3,7 +3,8 @@
 import numpy as np
 import pytest
 
-from fractals import GPU_AVAILABLE, MandelbrotCalculator, mandelbrot_section_jit
+from fractals import (GPU_AVAILABLE, MandelbrotCalculator,
+                      mandelbrot_section_jit)
 
 
 @pytest.mark.skipif(not GPU_AVAILABLE, reason="GPU not available")
