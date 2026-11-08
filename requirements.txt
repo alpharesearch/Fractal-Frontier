@@ -3,6 +3,7 @@
 Pillow
 numpy
 numba
+mpmath  # deep-zoom reference orbits (perturbation backend)
 # dev tools
 flake8==7.1.0
 pytest==8.2.0

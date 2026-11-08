@@ -21,6 +21,8 @@ from tkinter import messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
+from dd_math import (DD_EPS, dd_add, dd_add_d, dd_center, dd_format, dd_sub,
+                     dd_sub_d, dd_to_double)
 from fractals import GPU_AVAILABLE, MandelbrotCalculator
 from themes import apply_color_theme
 
@@ -40,6 +42,14 @@ WHEEL_COALESCE_MS = 120  # wheel notches merge into one animated zoom
 # but its ~1e-7 relative precision stops resolving deep-zoom detail.  Use it
 # only up to this zoom level; deeper views keep the float64 kernel.
 GPU_FLOAT32_MAX_ZOOM = 10.0
+
+# Backend depth bands (see fractals.py / deep_zoom.py).  A backend is picked
+# by comparing the pixel pitch to the arithmetic unit-in-the-last-place:
+#   pitch >= DEEP_MARGIN * ulp64  -> float32/float64 (GPU-capable)
+#   pitch >= DEEP_MARGIN * DD_EPS  -> double-double CPU kernels
+#   deeper                        -> perturbation backend (mandelbrot only)
+# DEEP_MARGIN = pixels of headroom before quantization bands appear.
+DEEP_MARGIN = 64.0
 
 # Interactive preview settings.  The overscan fallback renders at quarter
 # resolution over a 3x-viewport region when the tile cache is unavailable.
@@ -106,6 +116,12 @@ class MandelbrotViewer:
         self.x_max = np.float64(1.0)
         self.y_min = np.float64(-1.5)
         self.y_max = np.float64(1.5)
+        # Low parts of each bound: the view bounds are double-double sums
+        # (hi + lo) so deep-zoom navigation never loses sub-ulp increments.
+        self.x_min_lo = 0.0
+        self.x_max_lo = 0.0
+        self.y_min_lo = 0.0
+        self.y_max_lo = 0.0
         self.base_range = self.x_max - self.x_min  # 3.0
         self.zoom_level = 1.0
         self.is_zooming = False
@@ -538,6 +554,72 @@ class MandelbrotViewer:
         iters = int(256 * (max(zoom_level, 1e-9) ** 0.4))
         return min(max(iters, 32), 8192)
 
+    # ------------------------------------------------------------------
+    # Double-double view-state helpers.
+    # Bounds are (hi, lo) pairs; window-scale increments (pan deltas, zoom
+    # offsets) are plain doubles, which is exact at any zoom: only the
+    # absolute position needs the extra 53 bits. Every mutation goes
+    # through these helpers so hi/lo stay coherent.
+    # ------------------------------------------------------------------
+    def _set_bounds(self, x_min, x_max, y_min, y_max):
+        """Reset all four bounds to plain doubles (lo parts zeroed)."""
+        self.x_min, self.x_max = np.float64(x_min), np.float64(x_max)
+        self.y_min, self.y_max = np.float64(y_min), np.float64(y_max)
+        self.x_min_lo = self.x_max_lo = self.y_min_lo = self.y_max_lo = 0.0
+
+    def _view_range_x(self):
+        return dd_to_double(
+            *dd_sub(self.x_max, self.x_max_lo, self.x_min, self.x_min_lo)
+        )
+
+    def _view_range_y(self):
+        return dd_to_double(
+            *dd_sub(self.y_max, self.y_max_lo, self.y_min, self.y_min_lo)
+        )
+
+    def _shift_bounds(self, dx, dy):
+        """Translate the view by doubles dx/dy (window-scale, exact)."""
+        self.x_min, self.x_min_lo = dd_add_d(self.x_min, self.x_min_lo, dx)
+        self.x_max, self.x_max_lo = dd_add_d(self.x_max, self.x_max_lo, dx)
+        self.y_min, self.y_min_lo = dd_add_d(self.y_min, self.y_min_lo, dy)
+        self.y_max, self.y_max_lo = dd_add_d(self.y_max, self.y_max_lo, dy)
+
+    def _scale_around(self, cx_hi, cx_lo, cy_hi, cy_lo, factor):
+        """Scale every bound around a double-double anchor by factor."""
+        d = dd_to_double(
+            *dd_sub(cx_hi, cx_lo, self.x_min, self.x_min_lo)
+        )  # centre - x_min
+        self.x_min, self.x_min_lo = dd_sub_d(cx_hi, cx_lo, d * factor)
+        d = dd_to_double(
+            *dd_sub(self.x_max, self.x_max_lo, cx_hi, cx_lo)
+        )  # x_max - centre
+        self.x_max, self.x_max_lo = dd_add_d(cx_hi, cx_lo, d * factor)
+        d = dd_to_double(*dd_sub(cy_hi, cy_lo, self.y_min, self.y_min_lo))
+        self.y_min, self.y_min_lo = dd_sub_d(cy_hi, cy_lo, d * factor)
+        d = dd_to_double(*dd_sub(self.y_max, self.y_max_lo, cy_hi, cy_lo))
+        self.y_max, self.y_max_lo = dd_add_d(cy_hi, cy_lo, d * factor)
+
+    def _center_dd(self):
+        """View centre as ((hi, lo), (hi, lo))."""
+        cx = dd_center(self.x_min, self.x_min_lo, self.x_max, self.x_max_lo)
+        cy = dd_center(self.y_min, self.y_min_lo, self.y_max, self.y_max_lo)
+        return cx, cy
+
+    def _select_precision(self, current_range):
+        """Backend for the current pitch: float band, double-double, perturb."""
+        pitch = current_range / max(1, self.width)
+        ulp64 = max(
+            math.ulp(abs(float(self.x_min))),
+            math.ulp(abs(float(self.x_max))),
+            math.ulp(abs(float(self.y_min))),
+            math.ulp(abs(float(self.y_max))),
+        )
+        if self.fractal_type_var.get() == "Mandelbrot" and pitch < DEEP_MARGIN * DD_EPS:
+            return "perturb"
+        if pitch < DEEP_MARGIN * ulp64:
+            return "double_double"
+        return "float32" if self.zoom_level <= GPU_FLOAT32_MAX_ZOOM else "float64"
+
     def _adjust_aspect(self):
         """Keep pixels square by matching the y range to the canvas aspect.
 
@@ -549,13 +631,13 @@ class MandelbrotViewer:
         """
         if self.width < 2 or self.height < 2:
             return
-        x_range = float(self.x_max - self.x_min)
+        x_range = self._view_range_x()
         if not (x_range > 0 and math.isfinite(x_range)):
             return
-        y_center = (self.y_min + self.y_max) / 2
+        y_hi, y_lo = dd_center(self.y_min, self.y_min_lo, self.y_max, self.y_max_lo)
         y_range = x_range * self.height / self.width
-        self.y_min = y_center - y_range / 2
-        self.y_max = y_center + y_range / 2
+        self.y_min, self.y_min_lo = dd_sub_d(y_hi, y_lo, y_range / 2)
+        self.y_max, self.y_max_lo = dd_add_d(y_hi, y_lo, y_range / 2)
 
     def draw_mandelbrot(self, preview=False, overscan=False):
         """
@@ -573,11 +655,10 @@ class MandelbrotViewer:
         """
         if getattr(self, "_closed", False):
             return
-        current_range = float(self.x_max - self.x_min)
+        current_range = self._view_range_x()
         if not (current_range > 0 and math.isfinite(current_range)):
             # Degenerate bounds (e.g. zoomed out past float limits): reset.
-            self.x_min, self.x_max = -2.0, 1.0
-            self.y_min, self.y_max = -1.5, 1.5
+            self._set_bounds(-2.0, 1.0, -1.5, 1.5)
             current_range = 3.0
         self.zoom_level = self.base_range / current_range
         # Square pixels: re-derive the y range from the canvas aspect ratio.
@@ -608,15 +689,25 @@ class MandelbrotViewer:
             scale = PAN_PREVIEW_SCALE
             margin_x = max(1, int(self.width * PAN_PREVIEW_MARGIN))
             margin_y = max(1, int(self.height * PAN_PREVIEW_MARGIN))
-            x_range = float(self.x_max - self.x_min)
-            y_range = float(self.y_max - self.y_min)
-            cache_x_min = self.x_min - margin_x / self.width * x_range
-            cache_x_max = self.x_max + margin_x / self.width * x_range
-            cache_y_min = self.y_min - margin_y / self.height * y_range
-            cache_y_max = self.y_max + margin_y / self.height * y_range
+            x_range = self._view_range_x()
+            y_range = self._view_range_y()
+            # Overscan bounds as double-double pairs (deep-safe expansion).
+            b_x0 = dd_sub_d(self.x_min, self.x_min_lo, margin_x / self.width * x_range)
+            b_x1 = dd_add_d(self.x_max, self.x_max_lo, margin_x / self.width * x_range)
+            b_y0 = dd_sub_d(self.y_min, self.y_min_lo, margin_y / self.height * y_range)
+            b_y1 = dd_add_d(self.y_max, self.y_max_lo, margin_y / self.height * y_range)
             render_width = max(2, int((self.width + 2 * margin_x) * scale))
             render_height = max(2, int((self.height + 2 * margin_y) * scale))
-            bounds = (cache_x_min, cache_x_max, cache_y_min, cache_y_max)
+            bounds = (
+                float(b_x0[0]),
+                float(b_x0[1]),
+                float(b_x1[0]),
+                float(b_x1[1]),
+                float(b_y0[0]),
+                float(b_y0[1]),
+                float(b_y1[0]),
+                float(b_y1[1]),
+            )
         elif preview:
             scale = self._zoom_preview_scale
             margin_x = margin_y = 0
@@ -636,20 +727,41 @@ class MandelbrotViewer:
         section_widths = [base_width] * num_sections
         section_widths[-1] += render_width - base_width * num_sections
 
-        precision = "float32" if self.zoom_level <= GPU_FLOAT32_MAX_ZOOM else "float64"
+        precision = self._select_precision(
+            dd_to_double(*dd_sub(bounds[2], bounds[3], bounds[0], bounds[1]))
+            if bounds
+            else current_range
+        )
         self._render_precision = precision
+        deep = precision in ("double_double", "perturb")
+        # Deep backends are CPU-only; keep the user's GPU checkbox intact.
+        use_gpu = self.use_gpu and not deep
+        if bounds:
+            x_min, x_min_lo = bounds[0], bounds[1]
+            x_max, x_max_lo = bounds[2], bounds[3]
+            y_min, y_min_lo = bounds[4], bounds[5]
+            y_max, y_max_lo = bounds[6], bounds[7]
+        else:
+            x_min, x_min_lo = float(self.x_min), self.x_min_lo
+            x_max, x_max_lo = float(self.x_max), self.x_max_lo
+            y_min, y_min_lo = float(self.y_min), self.y_min_lo
+            y_max, y_max_lo = float(self.y_max), self.y_max_lo
         params = {
             "fractal_type": self.fractal_type_var.get(),
             "width": render_width,
             "height": render_height,
-            "x_min": float(bounds[0]) if bounds else float(self.x_min),
-            "x_max": float(bounds[1]) if bounds else float(self.x_max),
-            "y_min": float(bounds[2]) if bounds else float(self.y_min),
-            "y_max": float(bounds[3]) if bounds else float(self.y_max),
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "x_min_lo": x_min_lo,
+            "x_max_lo": x_max_lo,
+            "y_min_lo": y_min_lo,
+            "y_max_lo": y_max_lo,
             "max_iterations": self.max_iterations,
             "color_theme": self.color_theme,
             "julia_c": self.julia_c,
-            "use_gpu": self.use_gpu,
+            "use_gpu": use_gpu,
             "precision": precision,
             "num_sections": num_sections,
             "section_widths": section_widths,
@@ -698,7 +810,15 @@ class MandelbrotViewer:
                 # A long drag can leave tiles from an older window queued.
                 # Skip them without doing fractal work.
                 needed = self._tile_index_range(
-                    self.x_min, self.x_max, self.y_min, self.y_max, ring=TILE_RING
+                    self.x_min,
+                    self.x_min_lo,
+                    self.x_max,
+                    self.x_max_lo,
+                    self.y_min,
+                    self.y_min_lo,
+                    self.y_max,
+                    self.y_max_lo,
+                    ring=TILE_RING,
                 )
                 if key not in needed:
                     continue
@@ -726,11 +846,15 @@ class MandelbrotViewer:
         """Compute one raw iteration tile (worker thread)."""
         # If a previous GPU call already fell back to CPU, do not try the GPU
         # again for every queued tile.
-        use_gpu = meta["use_gpu"] and bool(MandelbrotCalculator._use_gpu)
+        precision = meta["precision"]
+        deep = precision in ("double_double", "perturb")
+        use_gpu = meta["use_gpu"] and bool(MandelbrotCalculator._use_gpu) and not deep
         MandelbrotCalculator.set_use_gpu(use_gpu)
         fractal_type = meta["fractal_type"].lower()
         c = meta["julia_c"] if meta["fractal_type"] == "Julia" else None
-        x_min, x_max, y_min, y_max = bounds
+        # Tile bounds are double-double pairs: (x0, x0_lo, x1, x1_lo,
+        # y0, y0_lo, y1, y1_lo).
+        x_min, x_min_lo, x_max, x_max_lo, y_min, y_min_lo, y_max, y_max_lo = bounds
         tile_px = meta["tile_px"]
         return self.calculator.calculate_full(
             fractal_type,
@@ -743,7 +867,8 @@ class MandelbrotViewer:
             meta["max_iterations"],
             None,
             c=c,
-            precision=meta["precision"],
+            precision=precision,
+            dd=(x_min_lo, x_max_lo, y_min_lo, y_max_lo),
         )
 
     def _poll_results(self):
@@ -819,6 +944,9 @@ class MandelbrotViewer:
         #
         # Workers return raw iteration counts, not RGB.  Colour mapping is a
         # single pass over the whole image afterwards.
+        if precision in ("double_double", "perturb"):
+            return self._compute_full_deep(params)
+
         tasks = []
         offset = 0
         for i in range(num_sections):
@@ -855,6 +983,68 @@ class MandelbrotViewer:
         else:
             raise ValueError(f"Unknown fractal type: {fractal_type!r}")
 
+        return np.hstack(section_arrays)
+
+    def _compute_full_deep(self, params):
+        """Section-split render for the deep backends (double-double/perturb)."""
+        fractal_type = params["fractal_type"]
+        width, height = params["width"], params["height"]
+        x_min, x_min_lo = params["x_min"], params.get("x_min_lo", 0.0)
+        x_max, x_max_lo = params["x_max"], params.get("x_max_lo", 0.0)
+        y_min, y_min_lo = params["y_min"], params.get("y_min_lo", 0.0)
+        max_iterations = params["max_iterations"]
+        num_sections = params["num_sections"]
+        section_widths = params["section_widths"]
+
+        dx = dd_to_double(*dd_sub(x_max, x_max_lo, x_min, x_min_lo)) / width
+        dy = (
+            dd_to_double(
+                *dd_sub(params["y_max"], params.get("y_max_lo", 0.0), y_min, y_min_lo)
+            )
+            / height
+        )
+
+        tasks = []
+        offset = 0
+        for i in range(num_sections):
+            section_width = section_widths[i]
+            # Per-section start position: DD addition of a window-scale
+            # double keeps every section's coordinates exact.
+            sx = dd_add_d(x_min, x_min_lo, offset * dx)
+            tasks.append(
+                (
+                    offset,
+                    section_width,
+                    width,
+                    height,
+                    float(sx[0]),
+                    float(sx[1]),
+                    dx,
+                    float(y_min),
+                    float(y_min_lo),
+                    dy,
+                    max_iterations,
+                    None,
+                )
+            )
+            offset += section_width
+
+        if fractal_type == "Mandelbrot":
+            if params.get("precision") == "perturb":
+                section_arrays = self.pool.starmap(
+                    self.calculator.calculate_mandelbrot_section_perturb, tasks
+                )
+            else:
+                section_arrays = self.pool.starmap(
+                    self.calculator.calculate_mandelbrot_section_dd, tasks
+                )
+        elif fractal_type == "Julia":
+            tasks = [task + (params["julia_c"],) for task in tasks]
+            section_arrays = self.pool.starmap(
+                self.calculator.calculate_julia_section_dd, tasks
+            )
+        else:
+            raise ValueError(f"Deep render for fractal type {fractal_type!r}")
         return np.hstack(section_arrays)
 
     def _set_image(self, array, preview=False):
@@ -903,12 +1093,22 @@ class MandelbrotViewer:
         return abs(cache["zoom_level"] - zoom) <= 1e-9 * max(1.0, abs(zoom))
 
     def _bounds_cover_current_view(self, bounds):
-        """True if the world-space bounds contain the current view."""
-        cx0, cx1, cy0, cy1 = bounds
-        vx0, vx1, vy0, vy1 = self.x_min, self.x_max, self.y_min, self.y_max
-        eps = 1e-12 * max(1.0, abs(cx0), abs(cx1), abs(cy0), abs(cy1))
+        """True if the pan-cache bounds contain the current view.
+
+        ``bounds`` are double-double pairs (x0, x0_lo, x1, x1_lo,
+        y0, y0_lo, y1, y1_lo); comparisons use DD subtraction so deep
+        views compare exactly.
+        """
+        cx0, cx0l, cx1, cx1l, cy0, cy0l, cy1, cy1l = bounds
+        eps = 1e-12 * max(1.0, abs(cx0), abs(cy0))
+        vx0 = dd_to_double(*dd_sub(self.x_min, self.x_min_lo, cx0, cx0l))
+        vx1 = dd_to_double(*dd_sub(self.x_max, self.x_max_lo, cx0, cx0l))
+        vy0 = dd_to_double(*dd_sub(self.y_min, self.y_min_lo, cy0, cy0l))
+        vy1 = dd_to_double(*dd_sub(self.y_max, self.y_max_lo, cy0, cy0l))
+        cache_w = dd_to_double(*dd_sub(cx1, cx1l, cx0, cx0l))
+        cache_h = dd_to_double(*dd_sub(cy1, cy1l, cy0, cy0l))
         return not (
-            vx0 < cx0 - eps or vx1 > cx1 + eps or vy0 < cy0 - eps or vy1 > cy1 + eps
+            vx0 < -eps or vx1 > cache_w + eps or vy0 < -eps or vy1 > cache_h + eps
         )
 
     def _cache_crop_for_current_view(self):
@@ -919,14 +1119,30 @@ class MandelbrotViewer:
         if not self._bounds_cover_current_view(cache["bounds"]):
             return None
 
-        cx0, cx1, cy0, cy1 = cache["bounds"]
-        vx0, vx1, vy0, vy1 = self.x_min, self.x_max, self.y_min, self.y_max
+        cx0, cx0l, cx1, cx1l, cy0, cy0l, cy1, cy1l = cache["bounds"]
         array = cache["array"]
         cache_h, cache_w = array.shape[:2]
-        fx0 = (vx0 - cx0) / (cx1 - cx0) * cache_w
-        fx1 = (vx1 - cx0) / (cx1 - cx0) * cache_w
-        fy0 = (vy0 - cy0) / (cy1 - cy0) * cache_h
-        fy1 = (vy1 - cy0) / (cy1 - cy0) * cache_h
+        # View position relative to the cache, via exact DD differences.
+        fx0 = (
+            dd_to_double(*dd_sub(self.x_min, self.x_min_lo, cx0, cx0l))
+            / dd_to_double(*dd_sub(cx1, cx1l, cx0, cx0l))
+            * cache_w
+        )
+        fx1 = (
+            dd_to_double(*dd_sub(self.x_max, self.x_max_lo, cx0, cx0l))
+            / dd_to_double(*dd_sub(cx1, cx1l, cx0, cx0l))
+            * cache_w
+        )
+        fy0 = (
+            dd_to_double(*dd_sub(self.y_min, self.y_min_lo, cy0, cy0l))
+            / dd_to_double(*dd_sub(cy1, cy1l, cy0, cy0l))
+            * cache_h
+        )
+        fy1 = (
+            dd_to_double(*dd_sub(self.y_max, self.y_max_lo, cy0, cy0l))
+            / dd_to_double(*dd_sub(cy1, cy1l, cy0, cy0l))
+            * cache_h
+        )
         j0 = max(0, min(cache_w - 1, int(math.floor(fx0))))
         j1 = max(j0 + 1, min(cache_w, int(math.ceil(fx1))))
         i0 = max(0, min(cache_h - 1, int(math.floor(fy0))))
@@ -1013,7 +1229,9 @@ class MandelbrotViewer:
         self._tiles = OrderedDict()
         self._tile_pending = set()
         self._tile_anchor_x = None
+        self._tile_anchor_x_lo = 0.0
         self._tile_anchor_y = None
+        self._tile_anchor_y_lo = 0.0
         self._tile_world = None
         self._tile_px = None
         self._tile_params = None
@@ -1022,7 +1240,14 @@ class MandelbrotViewer:
     def _start_tile_cache(self, raw, params):
         """Seed a pan tile cache from a settled full-resolution render."""
         view_w, view_h = params["width"], params["height"]
-        x_range = params["x_max"] - params["x_min"]
+        x_range = dd_to_double(
+            *dd_sub(
+                params["x_max"],
+                params.get("x_max_lo", 0.0),
+                params["x_min"],
+                params.get("x_min_lo", 0.0),
+            )
+        )
         if view_w <= 0 or view_h <= 0 or x_range <= 0:
             return
 
@@ -1034,8 +1259,12 @@ class MandelbrotViewer:
 
         tile_px = min(TILE_PX, view_w, view_h)
         self._tile_px = tile_px
+        # Anchors are double-double pairs: the tile grid must stay aligned
+        # at pitches far below float64 resolution.
         self._tile_anchor_x = params["x_min"]
+        self._tile_anchor_x_lo = params.get("x_min_lo", 0.0)
         self._tile_anchor_y = params["y_min"]
+        self._tile_anchor_y_lo = params.get("y_min_lo", 0.0)
         self._tile_world = tile_px / view_w * x_range
         self._tile_params = {
             "fractal_type": params["fractal_type"],
@@ -1081,16 +1310,17 @@ class MandelbrotViewer:
         zoom = self.zoom_level
         return abs(params["zoom_level"] - zoom) <= 1e-9 * max(1.0, abs(zoom))
 
-    def _tile_index_range(self, x0, x1, y0, y1, ring=0):
-        """Return tile keys intersecting a world-space rectangle."""
+    def _tile_index_range(self, x0, x0_lo, x1, x1_lo, y0, y0_lo, y1, y1_lo, ring=0):
+        """Return tile keys intersecting a world-space rectangle (DD pairs)."""
         tw = self._tile_world
         if tw is None or tw <= 0:
             return set()
-        ax, ay = self._tile_anchor_x, self._tile_anchor_y
-        i0 = int(math.floor((x0 - ax) / tw))
-        i1 = int(math.ceil((x1 - ax) / tw)) - 1
-        j0 = int(math.floor((y0 - ay) / tw))
-        j1 = int(math.ceil((y1 - ay) / tw)) - 1
+        ax, axl = self._tile_anchor_x, self._tile_anchor_x_lo
+        ay, ayl = self._tile_anchor_y, self._tile_anchor_y_lo
+        i0 = int(math.floor(dd_to_double(*dd_sub(x0, x0_lo, ax, axl)) / tw))
+        i1 = int(math.ceil(dd_to_double(*dd_sub(x1, x1_lo, ax, axl)) / tw)) - 1
+        j0 = int(math.floor(dd_to_double(*dd_sub(y0, y0_lo, ay, ayl)) / tw))
+        j1 = int(math.ceil(dd_to_double(*dd_sub(y1, y1_lo, ay, ayl)) / tw)) - 1
         if i1 < i0:
             i1 = i0
         if j1 < j0:
@@ -1102,11 +1332,26 @@ class MandelbrotViewer:
         return {(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)}
 
     def _tile_bounds(self, key):
-        """Full world bounds of one tile."""
+        """Full world bounds of one tile as double-double pairs."""
         i, j = key
-        x0 = self._tile_anchor_x + i * self._tile_world
-        y0 = self._tile_anchor_y + j * self._tile_world
-        return (x0, x0 + self._tile_world, y0, y0 + self._tile_world)
+        x0, x0_lo = dd_add_d(
+            self._tile_anchor_x, self._tile_anchor_x_lo, i * self._tile_world
+        )
+        x1, x1_lo = dd_add_d(x0, x0_lo, self._tile_world)
+        y0, y0_lo = dd_add_d(
+            self._tile_anchor_y, self._tile_anchor_y_lo, j * self._tile_world
+        )
+        y1, y1_lo = dd_add_d(y0, y0_lo, self._tile_world)
+        return (
+            float(x0),
+            float(x0_lo),
+            float(x1),
+            float(x1_lo),
+            float(y0),
+            float(y0_lo),
+            float(y1),
+            float(y1_lo),
+        )
 
     def _request_tile(self, key):
         """Queue one missing tile for the worker."""
@@ -1123,10 +1368,18 @@ class MandelbrotViewer:
         """Queue visible missing tiles first, then the surrounding ring."""
         if self._tile_params is None:
             return
-        visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
-        ring = self._tile_index_range(
-            self.x_min, self.x_max, self.y_min, self.y_max, ring=TILE_RING
+        view8 = (
+            self.x_min,
+            self.x_min_lo,
+            self.x_max,
+            self.x_max_lo,
+            self.y_min,
+            self.y_min_lo,
+            self.y_max,
+            self.y_max_lo,
         )
+        visible = self._tile_index_range(*view8)
+        ring = self._tile_index_range(*view8, ring=TILE_RING)
         # Keep the active window plus a bounded LRU history.  A quick
         # reversal across the edge of the ring then reuses tiles instead of
         # recomputing them.  Active tiles are never evicted; only the least
@@ -1143,15 +1396,20 @@ class MandelbrotViewer:
                 del self._tiles[key]
         self._tile_pending &= keep
 
-        cx = (self.x_min + self.x_max) / 2
-        cy = (self.y_min + self.y_max) / 2
+        (cx, cx_lo), (cy, cy_lo) = self._center_dd()
         tw = self._tile_world
 
         def distance(key):
             i, j = key
-            tx = self._tile_anchor_x + (i + 0.5) * tw
-            ty = self._tile_anchor_y + (j + 0.5) * tw
-            return (tx - cx) ** 2 + (ty - cy) ** 2
+            tx, tx_lo = dd_add_d(
+                self._tile_anchor_x, self._tile_anchor_x_lo, (i + 0.5) * tw
+            )
+            ty, ty_lo = dd_add_d(
+                self._tile_anchor_y, self._tile_anchor_y_lo, (j + 0.5) * tw
+            )
+            dx = dd_to_double(*dd_sub(tx, tx_lo, cx, cx_lo))
+            dy = dd_to_double(*dd_sub(ty, ty_lo, cy, cy_lo))
+            return dx * dx + dy * dy
 
         for key in sorted(visible, key=distance):
             self._request_tile(key)
@@ -1159,9 +1417,12 @@ class MandelbrotViewer:
             self._request_tile(key)
 
     def _tile_intersects_view(self, key):
-        x0, x1, y0, y1 = self._tile_bounds(key)
+        x0, x0_lo, x1, x1_lo, y0, y0_lo, y1, y1_lo = self._tile_bounds(key)
         return not (
-            x1 <= self.x_min or x0 >= self.x_max or y1 <= self.y_min or y0 >= self.y_max
+            dd_to_double(*dd_sub(x1, x1_lo, self.x_min, self.x_min_lo)) <= 0
+            or dd_to_double(*dd_sub(x0, x0_lo, self.x_max, self.x_max_lo)) >= 0
+            or dd_to_double(*dd_sub(y1, y1_lo, self.y_min, self.y_min_lo)) <= 0
+            or dd_to_double(*dd_sub(y0, y0_lo, self.y_max, self.y_max_lo)) >= 0
         )
 
     def _apply_tile(self, epoch, key, tile_array):
@@ -1172,7 +1433,15 @@ class MandelbrotViewer:
         if key in self._tiles:
             return False
         needed = self._tile_index_range(
-            self.x_min, self.x_max, self.y_min, self.y_max, ring=TILE_RING
+            self.x_min,
+            self.x_min_lo,
+            self.x_max,
+            self.x_max_lo,
+            self.y_min,
+            self.y_min_lo,
+            self.y_max,
+            self.y_max_lo,
+            ring=TILE_RING,
         )
         if key not in needed:
             return False
@@ -1191,7 +1460,16 @@ class MandelbrotViewer:
         """Composite available tiles into a raw array covering the view."""
         if not self._tile_cache_is_valid():
             return None
-        visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
+        visible = self._tile_index_range(
+            self.x_min,
+            self.x_min_lo,
+            self.x_max,
+            self.x_max_lo,
+            self.y_min,
+            self.y_min_lo,
+            self.y_max,
+            self.y_max_lo,
+        )
         if not visible:
             return None
 
@@ -1215,14 +1493,40 @@ class MandelbrotViewer:
                 comp[row : row + tile_px, col : col + tile_px] = tile
 
         tw = self._tile_world
-        comp_x0 = self._tile_anchor_x + i0 * tw
-        comp_x1 = self._tile_anchor_x + (i1 + 1) * tw
-        comp_y0 = self._tile_anchor_y + j0 * tw
-        comp_y1 = self._tile_anchor_y + (j1 + 1) * tw
-        fx0 = (self.x_min - comp_x0) / (comp_x1 - comp_x0) * comp_w
-        fx1 = (self.x_max - comp_x0) / (comp_x1 - comp_x0) * comp_w
-        fy0 = (self.y_min - comp_y0) / (comp_y1 - comp_y0) * comp_h
-        fy1 = (self.y_max - comp_y0) / (comp_y1 - comp_y0) * comp_h
+        comp_x0, comp_x0_lo = dd_add_d(
+            self._tile_anchor_x, self._tile_anchor_x_lo, i0 * tw
+        )
+        comp_x1, comp_x1_lo = dd_add_d(
+            self._tile_anchor_x, self._tile_anchor_x_lo, (i1 + 1) * tw
+        )
+        comp_y0, comp_y0_lo = dd_add_d(
+            self._tile_anchor_y, self._tile_anchor_y_lo, j0 * tw
+        )
+        comp_y1, comp_y1_lo = dd_add_d(
+            self._tile_anchor_y, self._tile_anchor_y_lo, (j1 + 1) * tw
+        )
+        comp_dx = dd_to_double(*dd_sub(comp_x1, comp_x1_lo, comp_x0, comp_x0_lo))
+        comp_dy = dd_to_double(*dd_sub(comp_y1, comp_y1_lo, comp_y0, comp_y0_lo))
+        fx0 = (
+            dd_to_double(*dd_sub(self.x_min, self.x_min_lo, comp_x0, comp_x0_lo))
+            / comp_dx
+            * comp_w
+        )
+        fx1 = (
+            dd_to_double(*dd_sub(self.x_max, self.x_max_lo, comp_x0, comp_x0_lo))
+            / comp_dx
+            * comp_w
+        )
+        fy0 = (
+            dd_to_double(*dd_sub(self.y_min, self.y_min_lo, comp_y0, comp_y0_lo))
+            / comp_dy
+            * comp_h
+        )
+        fy1 = (
+            dd_to_double(*dd_sub(self.y_max, self.y_max_lo, comp_y0, comp_y0_lo))
+            / comp_dy
+            * comp_h
+        )
         col0 = max(0, min(comp_w - 1, int(math.floor(fx0))))
         col1 = max(col0 + 1, min(comp_w, int(math.ceil(fx1))))
         row0 = max(0, min(comp_h - 1, int(math.floor(fy0))))
@@ -1234,7 +1538,16 @@ class MandelbrotViewer:
         """Display the cached-tile composite for the current view."""
         if not self._tile_cache_is_valid():
             return False
-        visible = self._tile_index_range(self.x_min, self.x_max, self.y_min, self.y_max)
+        visible = self._tile_index_range(
+            self.x_min,
+            self.x_min_lo,
+            self.x_max,
+            self.x_max_lo,
+            self.y_min,
+            self.y_min_lo,
+            self.y_max,
+            self.y_max_lo,
+        )
         if not any(key in self._tiles for key in visible):
             return False
         for key in visible:
@@ -1407,16 +1720,21 @@ class MandelbrotViewer:
             return
 
         num_sections = max(1, min(self.num_cores, 32, self.width))
-        backend = (
-            f"GPU ({self._render_precision})"
-            if self.use_gpu
-            else f"Cores: {num_sections}"
-        )
+        if self._render_precision == "perturb":
+            backend = "Deep (perturbation, CPU)"
+        elif self._render_precision == "double_double":
+            backend = "Deep (quad-float, CPU)"
+        elif self.use_gpu:
+            backend = f"GPU ({self._render_precision})"
+        else:
+            backend = f"Cores: {num_sections}"
         self._update_title(elapsed)
 
         coord_str = (
-            f"X_min: {self.x_min:.16g}, X_max: {self.x_max:.16g} | "
-            f"Y_min: {self.y_min:.16g}, Y_max: {self.y_max:.16g}"
+            f"X_min: {dd_format(self.x_min, self.x_min_lo, 30)}, "
+            f"X_max: {dd_format(self.x_max, self.x_max_lo, 30)} | "
+            f"Y_min: {dd_format(self.y_min, self.y_min_lo, 30)}, "
+            f"Y_max: {dd_format(self.y_max, self.y_max_lo, 30)}"
         )
         self.status_bar.config(text=f"{backend} | " + coord_str)
 
@@ -1469,12 +1787,18 @@ class MandelbrotViewer:
             "x_max": self.x_max,
             "y_min": self.y_min,
             "y_max": self.y_max,
+            # Low parts of the double-double bounds: bookmarks deep-zoom
+            # views lose everything below the 17th digit without them.
+            "x_min_lo": self.x_min_lo,
+            "x_max_lo": self.x_max_lo,
+            "y_min_lo": self.y_min_lo,
+            "y_max_lo": self.y_max_lo,
             "iteration_offset": self.iteration_offset,
             "color_theme": self.color_theme,
             "auto_adjust": self.auto_adjust,
             "fractal_type": self.fractal_type_var.get(),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "zoom_level": self.base_range / (self.x_max - self.x_min),
+            "zoom_level": self.base_range / self._view_range_x(),
             "max_iterations": self.max_iterations,
             "auto_iterations": self.auto_iterations,
         }
@@ -1539,6 +1863,11 @@ class MandelbrotViewer:
         for index, bm in enumerate(bookmarks):
             # Old-format bookmarks may lack some fields; use safe defaults so
             # a stale file can never crash the dialog.
+            def _bm_dd(key, default):
+                return dd_format(
+                    float(bm.get(key, default)), float(bm.get(key + "_lo", 0.0)), 24
+                )
+
             summary = (
                 f"{index+1}: {bm.get('timestamp', 'no date')} | "
                 f"Fractal: {bm.get('fractal_type', 'Mandelbrot')} | "
@@ -1547,10 +1876,8 @@ class MandelbrotViewer:
                 f"Auto Adj: {bm.get('auto_adjust', True)} | "
                 f"Iter_Offset: {bm.get('iteration_offset', 0)} | "
                 f"Auto Iter: {bm.get('auto_iterations', 0)} | "
-                f"X: {float(bm.get('x_min', -2.0)):.16g} "
-                f"to {float(bm.get('x_max', 1.0)):.16g} | "
-                f"Y: {float(bm.get('y_min', -1.5)):.16g} "
-                f"to {float(bm.get('y_max', 1.5)):.16g}"
+                f"X: {_bm_dd('x_min', -2.0)} to {_bm_dd('x_max', 1.0)} | "
+                f"Y: {_bm_dd('y_min', -1.5)} to {_bm_dd('y_max', 1.5)}"
             )
             lb.insert(tk.END, summary)
         lb.pack(fill=tk.BOTH, expand=True)
@@ -1572,6 +1899,11 @@ class MandelbrotViewer:
             self.x_max = float(bm.get("x_max", 1.0))
             self.y_min = float(bm.get("y_min", -1.5))
             self.y_max = float(bm.get("y_max", 1.5))
+            # Double-double low parts (old bookmarks default to 0).
+            self.x_min_lo = float(bm.get("x_min_lo", 0.0))
+            self.x_max_lo = float(bm.get("x_max_lo", 0.0))
+            self.y_min_lo = float(bm.get("y_min_lo", 0.0))
+            self.y_max_lo = float(bm.get("y_max_lo", 0.0))
             if not (self.x_min < self.x_max and self.y_min < self.y_max):
                 messagebox.showerror(
                     "Invalid Bookmark", "This bookmark has invalid view bounds."
@@ -1682,27 +2014,29 @@ class MandelbrotViewer:
         self.is_zooming = True
         self._invalidate_tile_cache()
         try:
-            width = self.x_max - self.x_min
-            height = self.y_max - self.y_min
+            width = self._view_range_x()
+            height = self._view_range_y()
             # Tkinter reports event.type as a STRING ('2' = KeyPress,
             # '4'/'5' = ButtonPress); comparing with int 2 was always False,
             # so keyboard zoom silently fell into the pointer-anchored path.
             if str(event.type) == "2":
-                center_x = (self.x_min + self.x_max) / 2
-                center_y = (self.y_min + self.y_max) / 2
+                (center_x, center_x_lo), (center_y, center_y_lo) = self._center_dd()
             else:
-                center_x = self.x_min + (event.x / self.width) * width
-                center_y = self.y_min + (event.y / self.height) * height
+                center_x, center_x_lo = dd_add_d(
+                    self.x_min, self.x_min_lo, (event.x / self.width) * width
+                )
+                center_y, center_y_lo = dd_add_d(
+                    self.y_min, self.y_min_lo, (event.y / self.height) * height
+                )
 
             # Mouse-anchored zoom: SCALE AROUND the cursor point so the
             # world point under the cursor lands exactly where it started.
             # (The old "center on the cursor point" formula only agrees with
             # this when the cursor IS the center, and overshoots the shift
             # toward the cursor by a factor of ~1/(1-factor) everywhere else.)
-            self.x_min = center_x - (center_x - self.x_min) * zoom_factor
-            self.x_max = center_x + (self.x_max - center_x) * zoom_factor
-            self.y_min = center_y - (center_y - self.y_min) * zoom_factor
-            self.y_max = center_y + (self.y_max - center_y) * zoom_factor
+            self._scale_around(
+                center_x, center_x_lo, center_y, center_y_lo, zoom_factor
+            )
             self.draw_mandelbrot()
         finally:
             self.is_zooming = False  # Reset zooming flag
@@ -1749,26 +2083,73 @@ class MandelbrotViewer:
         self._pan_cache = None
         self._invalidate_tile_cache()
         try:
-            width = self.x_max - self.x_min
-            height = self.y_max - self.y_min
+            width = self._view_range_x()
+            height = self._view_range_y()
 
             if str(event.type) == "2":  # Keyboard event (Tk type is a string)
-                center_x = (self.x_min + self.x_max) / 2
-                center_y = (self.y_min + self.y_max) / 2
+                (center_x, center_x_lo), (center_y, center_y_lo) = self._center_dd()
             else:  # Mouse event
-                center_x = self.x_min + (event.x / self.width) * width
-                center_y = self.y_min + (event.y / self.height) * height
+                center_x, center_x_lo = dd_add_d(
+                    self.x_min, self.x_min_lo, (event.x / self.width) * width
+                )
+                center_y, center_y_lo = dd_add_d(
+                    self.y_min, self.y_min_lo, (event.y / self.height) * height
+                )
 
             # Mouse-anchored target (see zoom()): scale around the cursor.
-            target_x_min = center_x - (center_x - self.x_min) * zoom_factor
-            target_x_max = center_x + (self.x_max - center_x) * zoom_factor
-            target_y_min = center_y - (center_y - self.y_min) * zoom_factor
-            target_y_max = center_y + (self.y_max - center_y) * zoom_factor
+            # Apply the full scale once, snapshot the target bounds, then
+            # restore: the animation walks to it in equal double-double
+            # steps (each step is a window-scale double, exact at any zoom).
+            start_bounds = (
+                self.x_min,
+                self.x_min_lo,
+                self.x_max,
+                self.x_max_lo,
+                self.y_min,
+                self.y_min_lo,
+                self.y_max,
+                self.y_max_lo,
+            )
+            self._scale_around(
+                center_x, center_x_lo, center_y, center_y_lo, zoom_factor
+            )
+            target_bounds = (
+                self.x_min,
+                self.x_min_lo,
+                self.x_max,
+                self.x_max_lo,
+                self.y_min,
+                self.y_min_lo,
+                self.y_max,
+                self.y_max_lo,
+            )
+            for name, value in zip(
+                (
+                    "x_min",
+                    "x_min_lo",
+                    "x_max",
+                    "x_max_lo",
+                    "y_min",
+                    "y_min_lo",
+                    "y_max",
+                    "y_max_lo",
+                ),
+                start_bounds,
+            ):
+                setattr(self, name, value)
 
-            step_x_min = (target_x_min - self.x_min) / frames
-            step_x_max = (target_x_max - self.x_max) / frames
-            step_y_min = (target_y_min - self.y_min) / frames
-            step_y_max = (target_y_max - self.y_max) / frames
+            # Animation delta per bound: exact DD difference target − start,
+            # divided into `frames` steps.
+            step_names = ("x_min", "x_max", "y_min", "y_max")
+            steps = {}
+            for k, name in enumerate(step_names):
+                dh, dl = dd_sub(
+                    target_bounds[2 * k],
+                    target_bounds[2 * k + 1],
+                    start_bounds[2 * k],
+                    start_bounds[2 * k + 1],
+                )
+                steps[name] = (dh / frames, dl / frames)
 
             frame_duration = int(
                 duration * 1000 / frames
@@ -1789,10 +2170,13 @@ class MandelbrotViewer:
                     self.draw_mandelbrot()
                     return
                 try:
-                    self.x_min += step_x_min
-                    self.x_max += step_x_max
-                    self.y_min += step_y_min
-                    self.y_max += step_y_max
+                    for name in ("x_min", "x_max", "y_min", "y_max"):
+                        sh, sl = steps[name]
+                        new_hi, new_lo = dd_add(
+                            getattr(self, name), getattr(self, name + "_lo"), sh, sl
+                        )
+                        setattr(self, name, new_hi)
+                        setattr(self, name + "_lo", new_lo)
                     self.draw_mandelbrot(preview=True, overscan=False)
                     self.master.after(frame_duration, animate_zoom_step, frame + 1)
                 except Exception as exc:
@@ -1840,15 +2224,14 @@ class MandelbrotViewer:
         dx = event.x - lx
         dy = event.y - ly
         self._pan_last = (event.x, event.y)
-        width = self.x_max - self.x_min
-        height = self.y_max - self.y_min
-        self.x_min -= dx / self.width * width
-        self.x_max -= dx / self.width * width
+        width = self._view_range_x()
+        height = self._view_range_y()
+        # Shift as double-double: the deltas are window-scale doubles, which
+        # stay exact at any zoom; the accumulating position does not.
         # Canvas row 0 (top) is y_min, so the same sign rule applies on both
         # axes: dragging the image down-left slides the view window the
         # opposite way in world coordinates.
-        self.y_min -= dy / self.height * height
-        self.y_max -= dy / self.height * height
+        self._shift_bounds(-dx / self.width * width, -dy / self.height * height)
 
         self._interacting = True
         self._interaction_mode = "pan"
@@ -1913,9 +2296,8 @@ class MandelbrotViewer:
             return
         # Delta must be computed BEFORE moving the first bound; recomputing
         # (y_max - y_min) after the update shrank the viewport 1% per pan.
-        dy = 0.1 * (self.y_max - self.y_min)
-        self.y_min += dy
-        self.y_max += dy
+        dy = 0.1 * self._view_range_y()
+        self._shift_bounds(0.0, dy)
         self.draw_mandelbrot()
 
     def move_up(self, event):
@@ -1927,9 +2309,8 @@ class MandelbrotViewer:
         """
         if self._typing_in_entry(event):
             return
-        dy = 0.1 * (self.y_max - self.y_min)
-        self.y_min -= dy
-        self.y_max -= dy
+        dy = 0.1 * self._view_range_y()
+        self._shift_bounds(0.0, -dy)
         self.draw_mandelbrot()
 
     def move_left(self, event):
@@ -1942,9 +2323,8 @@ class MandelbrotViewer:
         if self._typing_in_entry(event):
             return
         # Delta computed once, before any bound is moved (see move_down).
-        dx = 0.1 * (self.x_max - self.x_min)
-        self.x_min -= dx
-        self.x_max -= dx
+        dx = 0.1 * self._view_range_x()
+        self._shift_bounds(-dx, 0.0)
         self.draw_mandelbrot()
 
     def move_right(self, event):
@@ -1956,9 +2336,8 @@ class MandelbrotViewer:
         """
         if self._typing_in_entry(event):
             return
-        dx = 0.1 * (self.x_max - self.x_min)
-        self.x_min += dx
-        self.x_max += dx
+        dx = 0.1 * self._view_range_x()
+        self._shift_bounds(dx, 0.0)
         self.draw_mandelbrot()
 
     def toggle_auto_adjust(self):
@@ -2006,8 +2385,7 @@ class MandelbrotViewer:
         # programmatically (e.g. from reset_view), not just from the menu.
         self.fractal_type_var.set(value)
         if value == "Mandelbrot":
-            self.x_min, self.x_max = -2.0, 1.0
-            self.y_min, self.y_max = -1.5, 1.5
+            self._set_bounds(-2.0, 1.0, -1.5, 1.5)
             # Hide Julia C input fields and the new slider
             self.julia_c_real_entry.grid_remove()
             self.julia_c_imag_entry.grid_remove()
@@ -2018,8 +2396,7 @@ class MandelbrotViewer:
             self.e_exp_i_n_label.grid_remove()
             self.e_exp_i_n_slider.grid_remove()
         elif value == "Julia":
-            self.x_min, self.x_max = -1.5, 1.5
-            self.y_min, self.y_max = -1.5, 1.5
+            self._set_bounds(-1.5, 1.5, -1.5, 1.5)
             self.julia_c = complex(-0.7, 0.27015)  # Example Julia constant
             # Show Julia C input fields and the new slider
             self.julia_c_real_entry.grid()
@@ -2031,8 +2408,7 @@ class MandelbrotViewer:
             self.e_exp_i_n_label.grid()
             self.e_exp_i_n_slider.grid()
         elif value == "Fatou":
-            self.x_min, self.x_max = -2.0, 2.0
-            self.y_min, self.y_max = -2.0, 2.0
+            self._set_bounds(-2.0, 2.0, -2.0, 2.0)
             # Hide Julia C input fields and the new slider
             self.julia_c_real_entry.grid_remove()
             self.julia_c_imag_entry.grid_remove()

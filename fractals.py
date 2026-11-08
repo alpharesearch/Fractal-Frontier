@@ -285,6 +285,185 @@ def fatou_section_jit(
 
 
 # --------------------------------------------------------------------------
+# DOUBLE-DOUBLE (QUAD-FLOAT) DEEP-ZOOM KERNELS
+# --------------------------------------------------------------------------
+# Coordinates are carried as (hi, lo) pairs — an unevaluated 106-bit sum of
+# two doubles (~32 significant digits). This pushes the smooth-zoom ceiling
+# from ~1e13 magnification (float64 ULP) to ~1e30 before the perturbation
+# backend takes over. TwoSum/TwoProd rely on strict IEEE round-to-nearest,
+# so these kernels are compiled WITHOUT fastmath (contraction destroys the
+# error term) and with cache=True.
+_DD_SPLIT = 134217857.0  # 2^27 + 1 (Dekker splitter)
+
+
+@njit(cache=True)
+def _dd_two_sum(a, b):
+    s = a + b
+    bb = s - a
+    aa = s - bb
+    return s, (a - aa) + (b - bb)
+
+
+@njit(cache=True)
+def _dd_split(a):
+    t = a * _DD_SPLIT
+    ah = t - (t - a)
+    return ah, a - ah
+
+
+@njit(cache=True)
+def _dd_two_prod(a, b):
+    p = a * b
+    ah, al = _dd_split(a)
+    bh, bl = _dd_split(b)
+    e = ((ah * bh - p) + ah * bl + al * bh) + al * bl
+    return p, e
+
+
+@njit(cache=True)
+def _dd_add(ah, al, bh, bl):
+    hi, lo = _dd_two_sum(ah, bh)
+    lo += al + bl
+    return _dd_two_sum(hi, lo)
+
+
+@njit(cache=True)
+def _dd_add_d(ah, al, b):
+    hi, lo = _dd_two_sum(ah, b)
+    lo += al
+    return _dd_two_sum(hi, lo)
+
+
+@njit(cache=True)
+def _dd_mul(ah, al, bh, bl):
+    hi, lo = _dd_two_prod(ah, bh)
+    lo += ah * bl + al * bh
+    return _dd_two_sum(hi, lo)
+
+
+@njit(parallel=True, cache=True)
+def mandelbrot_section_dd_jit(
+    section_offset,
+    section_width,
+    width,
+    height,
+    x_min,
+    x_min_lo,
+    dx,
+    y_min,
+    y_min_lo,
+    dy,
+    max_iterations,
+):
+    """Double-deep Mandelbrot section with double-double coordinates.
+
+    Same output contract as ``mandelbrot_section_jit`` (int32 iteration
+    counts), but pixel positions are 106-bit DD sums: ``x_min``/``y_min``
+    arrive as (hi, lo) pairs and ``dx``/``dy`` are plain per-pixel spacings
+    (window-scale, exactly representable as doubles).
+
+    Cardioid/bulb checks are dropped: deep views never sit inside them.
+    Brent cycle detection stays (hi-part distance, threshold 1e-24).
+    """
+    section_counts = np.empty((height, section_width), dtype=np.int32)
+
+    for i in prange(height):
+        yh, yl = _dd_add_d(y_min, y_min_lo, (i + 0.5) * dy)
+        for j in range(section_width):
+            xh, xl = _dd_add_d(x_min, x_min_lo, (section_offset + j + 0.5) * dx)
+
+            zr, zlr = 0.0, 0.0
+            zi, zli = 0.0, 0.0
+            count = 0
+            tort_r, tort_i = 0.0, 0.0
+            power = 1
+            lam = 0
+
+            while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
+                # z = z^2 + c in double-double
+                ar, al_ = _dd_mul(zr, zlr, zr, zlr)  # zr^2
+                br, bl_ = _dd_mul(zi, zli, zi, zli)  # zi^2
+                rr, rl = _dd_add(ar, al_, -br, -bl_)  # zr^2 - zi^2
+                mr, ml = _dd_mul(zr, zlr, zi, zli)  # zr * zi
+                nr, nl = _dd_add(rr, rl, xh, xl)
+                ni, nil = _dd_add(mr * 2.0, ml * 2.0, yh, yl)
+                zr, zlr, zi, zli = nr, nl, ni, nil
+                count += 1
+
+                dr = zr - tort_r
+                di = zi - tort_i
+                if dr * dr + di * di < 1e-24:
+                    count = max_iterations
+                    break
+                lam += 1
+                if lam == power:
+                    tort_r, tort_i = zr, zi
+                    power *= 2
+                    lam = 0
+
+            section_counts[i, j] = count
+    return section_counts
+
+
+@njit(parallel=True, cache=True)
+def julia_section_dd_jit(
+    section_offset,
+    section_width,
+    width,
+    height,
+    x_min,
+    x_min_lo,
+    dx,
+    y_min,
+    y_min_lo,
+    dy,
+    max_iterations,
+    c,
+):
+    """Julia section with double-double starting points (c stays a double)."""
+    section_counts = np.empty((height, section_width), dtype=np.int32)
+
+    cr = c.real
+    ci = c.imag
+
+    for i in prange(height):
+        yh, yl = _dd_add_d(y_min, y_min_lo, (i + 0.5) * dy)
+        for j in range(section_width):
+            xh, xl = _dd_add_d(x_min, x_min_lo, (section_offset + j + 0.5) * dx)
+
+            zr, zlr = xh, xl
+            zi, zli = yh, yl
+            count = 0
+            tort_r, tort_i = zr, zi
+            power = 1
+            lam = 0
+
+            while (zr * zr + zi * zi < 4.0) and (count < max_iterations):
+                ar, al_ = _dd_mul(zr, zlr, zr, zlr)
+                br, bl_ = _dd_mul(zi, zli, zi, zli)
+                rr, rl = _dd_add(ar, al_, -br, -bl_)
+                mr, ml = _dd_mul(zr, zlr, zi, zli)
+                nr, nl = _dd_add(rr, rl, cr, 0.0)
+                ni, nil = _dd_add(mr * 2.0, ml * 2.0, ci, 0.0)
+                zr, zlr, zi, zli = nr, nl, ni, nil
+                count += 1
+
+                dr = zr - tort_r
+                di = zi - tort_i
+                if dr * dr + di * di < 1e-24:
+                    count = max_iterations
+                    break
+                lam += 1
+                if lam == power:
+                    tort_r, tort_i = zr, zi
+                    power *= 2
+                    lam = 0
+
+            section_counts[i, j] = count
+    return section_counts
+
+
+# --------------------------------------------------------------------------
 # GPU-AWARE MANDELBROT CALCULATOR CLASS
 # --------------------------------------------------------------------------
 class MandelbrotCalculator:
@@ -314,6 +493,87 @@ class MandelbrotCalculator:
             cls._gpu_instance = GPUCalculator()
         return cls._gpu_instance
 
+    @staticmethod
+    def _deep_spacings(x_min, x_max, y_min, y_max, dd, width, height):
+        """Window-scale spacings for deep backends (DD subtraction is exact)."""
+        from dd_math import dd_sub, dd_to_double
+
+        if dd is None:
+            dd = (0.0, 0.0, 0.0, 0.0)
+        x_min_lo, x_max_lo, y_min_lo, y_max_lo = dd
+        dx = dd_to_double(*dd_sub(x_max, x_max_lo, x_min, x_min_lo)) / width
+        dy = dd_to_double(*dd_sub(y_max, y_max_lo, y_min, y_min_lo)) / height
+        return x_min_lo, y_min_lo, dx, dy
+
+    def _compute_deep(
+        self,
+        fractal_type,
+        width,
+        height,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        max_iterations,
+        c,
+        precision,
+        dd,
+    ):
+        """CPU deep-zoom dispatch (double-double / perturbation)."""
+        x_min_lo, y_min_lo, dx, dy = self._deep_spacings(
+            x_min, x_max, y_min, y_max, dd, width, height
+        )
+        if fractal_type == "mandelbrot":
+            if precision == "perturb":
+                from deep_zoom import calculate_mandelbrot_perturb
+
+                return calculate_mandelbrot_perturb(
+                    width,
+                    height,
+                    x_min,
+                    x_min_lo,
+                    dx,
+                    y_min,
+                    y_min_lo,
+                    dy,
+                    max_iterations,
+                )
+            return mandelbrot_section_dd_jit(
+                0,
+                width,
+                width,
+                height,
+                x_min,
+                x_min_lo,
+                dx,
+                y_min,
+                y_min_lo,
+                dy,
+                max_iterations,
+            )
+        if fractal_type == "julia":
+            if c is None:
+                c = complex(-0.7, 0.27015)
+            return julia_section_dd_jit(
+                0,
+                width,
+                width,
+                height,
+                x_min,
+                x_min_lo,
+                dx,
+                y_min,
+                y_min_lo,
+                dy,
+                max_iterations,
+                c,
+            )
+        # Fatou has no deep kernel yet: iterate in plain float64 (the image
+        # degrades at deep zoom, which beats failing the render outright).
+        return fatou_section_jit(
+            0, width, width, height, x_min, x_max, y_min, y_max, max_iterations
+        )
+
     def _compute_iterations(
         self,
         fractal_type,
@@ -326,18 +586,39 @@ class MandelbrotCalculator:
         max_iterations,
         c=None,
         precision="float64",
+        dd=None,
     ):
         """
         Compute the raw int32 iteration array for the full image.
 
-        Uses the GPU when enabled; falls back to the CPU JIT path if the GPU
-        fails at runtime (e.g. driver lost), disabling GPU mode afterwards.
+        Backend selection by `precision`:
+          - "float32"/"float64": GPU when enabled (falls back to the CPU JIT
+            path at runtime, disabling GPU mode afterwards).
+          - "double_double": 106-bit coordinates, mandelbrot/julia on the CPU.
+          - "perturb": Deep Zoom Algorithm (mpmath reference orbit + float64
+            deltas) for mandelbrot; falls back to double-double for julia.
+        Deep backends never use the GPU kernels.
 
-        `precision` is passed to the GPU backend: "float32" is faster but
-        only safe for shallow zooms, "float64" preserves deep-zoom detail.
-        CPU paths always use double precision.
+        `dd` carries the low parts for deep precision:
+        (x_min_lo, x_max_lo, y_min_lo, y_max_lo).
         """
         max_iterations = max(1, int(max_iterations))
+
+        if precision in ("double_double", "perturb"):
+            return self._compute_deep(
+                fractal_type,
+                width,
+                height,
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                max_iterations,
+                c,
+                precision,
+                dd,
+            )
+
         if self._use_gpu:
             try:
                 gpu_calc = self.get_gpu_calculator()
@@ -413,6 +694,7 @@ class MandelbrotCalculator:
         theme,
         c=None,
         precision="float64",
+        dd=None,
     ):
         """
         Calculate the full fractal image in one GPU/CPU call.
@@ -422,7 +704,9 @@ class MandelbrotCalculator:
             fractal_type: 'mandelbrot', 'julia', or 'fatou'
             theme: color theme name, or None to return raw iteration counts
             c: Julia constant (complex), used only for julia type
-            precision: GPU precision, "float32" or "float64"
+            precision: backend, "float32"/"float64"/"double_double"/"perturb"
+            dd: (x_min_lo, x_max_lo, y_min_lo, y_max_lo) low parts for deep
+                precision backends
         """
         iterations = self._compute_iterations(
             fractal_type,
@@ -435,6 +719,7 @@ class MandelbrotCalculator:
             max_iterations,
             c,
             precision=precision,
+            dd=dd,
         )
         if theme is None:
             return iterations
@@ -538,3 +823,113 @@ class MandelbrotCalculator:
             return iterations
         colors = apply_color_theme(iterations, max_iterations, theme)
         return colors
+
+    def calculate_mandelbrot_section_dd(
+        self,
+        section_offset,
+        section_width,
+        width,
+        height,
+        x_min,
+        x_min_lo,
+        dx,
+        y_min,
+        y_min_lo,
+        dy,
+        max_iterations,
+        theme,
+    ):
+        """Double-double Mandelbrot section (pool worker, deep zoom).
+
+        ``x_min``/``y_min`` arrive as (hi, lo) pairs already offset to this
+        section; ``dx``/``dy`` are the plain per-pixel spacings.
+        """
+        iterations = mandelbrot_section_dd_jit(
+            section_offset,
+            section_width,
+            width,
+            height,
+            x_min,
+            x_min_lo,
+            dx,
+            y_min,
+            y_min_lo,
+            dy,
+            max_iterations,
+        )
+        if theme is None:
+            return iterations
+        return apply_color_theme(iterations, max_iterations, theme)
+
+    def calculate_julia_section_dd(
+        self,
+        section_offset,
+        section_width,
+        width,
+        height,
+        x_min,
+        x_min_lo,
+        dx,
+        y_min,
+        y_min_lo,
+        dy,
+        max_iterations,
+        theme,
+        c,
+    ):
+        """Double-double Julia section (pool worker, deep zoom)."""
+        iterations = julia_section_dd_jit(
+            section_offset,
+            section_width,
+            width,
+            height,
+            x_min,
+            x_min_lo,
+            dx,
+            y_min,
+            y_min_lo,
+            dy,
+            max_iterations,
+            c,
+        )
+        if theme is None:
+            return iterations
+        return apply_color_theme(iterations, max_iterations, theme)
+
+    def calculate_mandelbrot_section_perturb(
+        self,
+        section_offset,
+        section_width,
+        width,
+        height,
+        x_min,
+        x_min_lo,
+        dx,
+        y_min,
+        y_min_lo,
+        dy,
+        max_iterations,
+        theme,
+    ):
+        """Perturbation-theory Mandelbrot section (pool worker, deep zoom).
+
+        ``section_offset`` is unused: the reference orbits are built for this
+        section's own rectangle. Kept in the signature so the pool task
+        tuples stay uniform across backends.
+        """
+        from deep_zoom import calculate_mandelbrot_perturb
+
+        iterations = calculate_mandelbrot_perturb(
+            section_width,
+            height,
+            x_min,
+            x_min_lo,
+            dx,
+            y_min,
+            y_min_lo,
+            dy,
+            max_iterations,
+        )
+        if theme is None:
+            return iterations
+        return apply_color_theme(iterations, max_iterations, theme)

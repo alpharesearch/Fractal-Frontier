@@ -849,7 +849,15 @@ def test_pan_uses_tile_cache_without_full_render(tile_view):
     assert viewer._render_queue.empty(), "pan requested a full frame render"
     assert viewer._display_tile_view()
     needed = viewer._tile_index_range(
-        viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max, ring=1
+        viewer.x_min,
+        viewer.x_min_lo,
+        viewer.x_max,
+        viewer.x_max_lo,
+        viewer.y_min,
+        viewer.y_min_lo,
+        viewer.y_max,
+        viewer.y_max_lo,
+        ring=1,
     )
     assert set(viewer._tiles) <= needed, "tiles outside the ring were kept"
     viewer._pan_release(PtEv(190, 100, root))

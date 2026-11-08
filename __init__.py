@@ -6,7 +6,8 @@ color themes, zoom capabilities, and bookmark functionality.
 """
 
 from fractals import (MandelbrotCalculator, fatou_section_jit,
-                      julia_section_jit, mandelbrot_section_jit)
+                      julia_section_dd_jit, julia_section_jit,
+                      mandelbrot_section_dd_jit, mandelbrot_section_jit)
 from themes import apply_color_theme
 
 __all__ = [
@@ -14,5 +15,7 @@ __all__ = [
     "mandelbrot_section_jit",
     "julia_section_jit",
     "fatou_section_jit",
+    "mandelbrot_section_dd_jit",
+    "julia_section_dd_jit",
     "apply_color_theme",
 ]
