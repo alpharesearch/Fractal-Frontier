@@ -51,12 +51,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project structure overview
 ```
 Fractal Frontier/            # root of the repository
-├── Fractal_Frontier.py      # Main application code (GUI + Mandelbrot calculations)
-├── requirements.txt         # Pillow, numpy, numba
+├── Fractal_Frontier.py      # Main application (GUI, viewer, interaction, tile cache)
+├── fractals.py              # CPU/GPU calculator and backend selection
+├── gpu_fractals.py          # Numba CUDA kernels and launch configuration
+├── themes.py                # Colour themes and palette helpers
+├── requirements.txt         # Runtime and development dependencies
+├── pytest.ini               # Test configuration and warning policy
+├── Makefile                 # Environment, test, lint, format, and run targets
 ├── README.md                # High‑level documentation
+├── CLAUDE.md                # Architecture and development guidance
 ├── LICENSE                  # MIT license
 └── tests/                   # Test suite directory
-    └── test_calculator.py   # Unit tests for the calculator and theme system
+    ├── test_calculator.py
+    ├── test_colors.py
+    ├── test_gpu.py
+    ├── test_regressions.py
+    ├── test_viewer_functionality.py
+    └── test_viewer_integration.py
 ```
 The core logic lives in `Fractal_Frontier.py`:
 - **Color theme system** – `apply_color_theme()` dispatches to a set of predefined themes (Default, Grayscale, Blue, Fire, Rainbow…). The high-resolution themes (Rainbow2/3/4) use finer HSV palettes with 256/1024/8192 hue steps.
