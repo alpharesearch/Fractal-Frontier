@@ -51,15 +51,13 @@ def digits_for_pitch(pitch, extra=5):
     return int(min(150, max(40, 35 + depth * 0.55 + extra)))
 
 
-def build_reference(c0_hi, c0_lo, dps, max_iterations):
-    """High-precision reference orbit of c0, rounded to float64 arrays.
-
-    Returns (zs_r, zs_i): arrays of z_0 … z_N. The rounded doubles are
-    sufficient — the switching test keeps |δ| ≪ |z|, so the rounding of the
-    reference perturbs δ far below the noise floor.
-    """
+def build_reference(c0r_hi, c0r_lo, c0i_hi, c0i_lo, dps, max_iterations):
+    """High-precision complex reference orbit of c0 = (c0r, c0i)."""
     with mp.workdps(dps):
-        c0 = _dd_to_mpf(c0_hi, c0_lo)
+        c0 = mp.mpc(
+            _dd_to_mpf(c0r_hi, c0r_lo),
+            _dd_to_mpf(c0i_hi, c0i_lo),
+        )
         z = mp.mpc(0)
         zr = []
         zi = []
@@ -114,7 +112,9 @@ def _perturb_counts_jit(
                     break
                 z2 = zr * zr + zi * zi
                 d2 = dr * dr + di * di
-                if d2 > SWITCH_RATIO2 * z2:
+                # n == 0 has z_0 == 0, so the relative test would flag every
+                # non-zero delta; skip it and start comparing at z_1.
+                if n > 0 and d2 > SWITCH_RATIO2 * z2:
                     switches[i, j] = d2
                     break
                 nr = dr * dr - di * di + 2.0 * (zr * dr - zi * di) + a0r
@@ -166,7 +166,7 @@ def calculate_mandelbrot_perturb(
 
     roots = 0
     while roots <= MAX_ROOTS:
-        zs_r, zs_i = build_reference(cx_hi, cx_lo, dps, max_iterations)
+        zs_r, zs_i = build_reference(cx_hi, cx_lo, cy_hi, cy_lo, dps, max_iterations)
         zs_len = min(len(zs_r) - 1, max_iterations)
         new_counts, switches = _perturb_counts_jit(
             width,

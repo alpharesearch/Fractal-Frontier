@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 
 from dd_math import (DD_EPS, dd_add_d, dd_center, dd_format, dd_sub,
                      dd_to_double, two_prod, two_sum)
-from deep_zoom import calculate_mandelbrot_perturb, digits_for_pitch
+from deep_zoom import (build_reference, calculate_mandelbrot_perturb,
+                       digits_for_pitch)
 from fractals import (MandelbrotCalculator, julia_section_dd_jit,
                       julia_section_jit, mandelbrot_section_dd_jit)
 
@@ -205,6 +206,72 @@ def test_perturb_extreme_pitch():
     )
     assert (pert >= 0).all()
     assert len(np.unique(pert)) >= 1
+
+
+def test_build_reference_includes_imaginary_part():
+    """The reference orbit must be built from the complex centre, not just
+    its real part: at z_2 the imaginary component is clearly non-zero."""
+    zs_r, zs_i = build_reference(0.3, 0.0, 0.5, 0.0, 40, 5)
+    # z_1 = c0, z_2 = c0^2 + c0.
+    assert abs(zs_r[1] - 0.3) < 1e-12
+    assert abs(zs_i[1] - 0.5) < 1e-12
+    assert abs(zs_r[2] - 0.14) < 1e-12
+    assert abs(zs_i[2] - 0.8) < 1e-12
+
+
+def test_deep_sections_match_full_render():
+    """The pool path must stitch the same image as one full DD render.
+
+    Regression for double-counting ``section_offset``: pre-shifting x_min
+    and also letting the kernel add the offset moved each section by
+    2*offset, producing vertical bands.
+    """
+    from types import SimpleNamespace
+
+    from Fractal_Frontier import MandelbrotViewer
+
+    class Pool:
+        def starmap(self, fn, tasks):
+            return [fn(*t) for t in tasks]
+
+    viewer = SimpleNamespace(pool=Pool(), calculator=calc)
+    cx, cy = SPIRAL
+    width, height = 32, 24
+    pitch = 1e-17
+    x_max = cx + width * pitch
+    y_max = cy + height * pitch
+    params = {
+        "fractal_type": "Mandelbrot",
+        "width": width,
+        "height": height,
+        "x_min": cx,
+        "x_min_lo": 0.0,
+        "x_max": x_max,
+        "x_max_lo": 0.0,
+        "y_min": cy,
+        "y_min_lo": 0.0,
+        "y_max": y_max,
+        "y_max_lo": 0.0,
+        "max_iterations": 20000,
+        "num_sections": 4,
+        "section_widths": [8, 8, 8, 8],
+        "precision": "double_double",
+        "julia_c": None,
+    }
+    stitched = MandelbrotViewer._compute_full_deep(viewer, params)
+    full = calc.calculate_full(
+        "mandelbrot",
+        width,
+        height,
+        cx,
+        x_max,
+        cy,
+        y_max,
+        20000,
+        None,
+        precision="double_double",
+    )
+    assert np.array_equal(stitched, full)
 
 
 # ----------------------------------------------------------------------

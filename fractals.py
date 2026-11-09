@@ -841,8 +841,9 @@ class MandelbrotCalculator:
     ):
         """Double-double Mandelbrot section (pool worker, deep zoom).
 
-        ``x_min``/``y_min`` arrive as (hi, lo) pairs already offset to this
-        section; ``dx``/``dy`` are the plain per-pixel spacings.
+        ``x_min``/``y_min`` are the view's base (hi, lo) pairs;
+        ``section_offset`` is the section's global column offset, which the
+        kernel applies. ``dx``/``dy`` are the plain per-pixel spacings.
         """
         iterations = mandelbrot_section_dd_jit(
             section_offset,
@@ -877,7 +878,12 @@ class MandelbrotCalculator:
         theme,
         c,
     ):
-        """Double-double Julia section (pool worker, deep zoom)."""
+        """Double-double Julia section (pool worker, deep zoom).
+
+        ``x_min``/``y_min`` are the view's base (hi, lo) pairs;
+        ``section_offset`` is the section's global column offset, which the
+        kernel applies.
+        """
         iterations = julia_section_dd_jit(
             section_offset,
             section_width,

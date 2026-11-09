@@ -1062,21 +1062,32 @@ class MandelbrotViewer:
             / height
         )
 
+        precision = params.get("precision", "double_double")
+
         tasks = []
         offset = 0
         for i in range(num_sections):
             section_width = section_widths[i]
-            # Per-section start position: DD addition of a window-scale
-            # double keeps every section's coordinates exact.
-            sx = dd_add_d(x_min, x_min_lo, offset * dx)
+            if precision == "perturb":
+                # Perturbation builds a reference orbit for its own rectangle:
+                # x_min must be shifted to this section's first column.  Its
+                # kernel ignores section_offset.
+                sx = dd_add_d(x_min, x_min_lo, offset * dx)
+                task_x_min, task_x_min_lo = float(sx[0]), float(sx[1])
+            else:
+                # The DD kernel applies section_offset itself, so x_min stays
+                # at the view's base coordinate.  Pre-shifting here as well
+                # would move every section by 2*offset and leave vertical
+                # gaps/repeated bands across the image.
+                task_x_min, task_x_min_lo = float(x_min), float(x_min_lo)
             tasks.append(
                 (
                     offset,
                     section_width,
                     width,
                     height,
-                    float(sx[0]),
-                    float(sx[1]),
+                    task_x_min,
+                    task_x_min_lo,
                     dx,
                     float(y_min),
                     float(y_min_lo),
@@ -1088,7 +1099,7 @@ class MandelbrotViewer:
             offset += section_width
 
         if fractal_type == "Mandelbrot":
-            if params.get("precision") == "perturb":
+            if precision == "perturb":
                 section_arrays = self.pool.starmap(
                     self.calculator.calculate_mandelbrot_section_perturb, tasks
                 )
