@@ -130,5 +130,23 @@
     "zoom_level": 4.780233115597351e+26,
     "max_iterations": 17274,
     "auto_iterations": 8192
+  },
+  {
+    "x_min": -0.7454642792047881,
+    "x_max": -0.7454642792047881,
+    "y_min": 0.10700158801025167,
+    "y_max": 0.10700158801025167,
+    "x_min_lo": -9.789304372927869e-18,
+    "x_max_lo": -9.789304372927675e-18,
+    "y_min_lo": 2.798855395978615e-18,
+    "y_max_lo": 2.7988553959787175e-18,
+    "iteration_offset": 9082,
+    "color_theme": "Rainbow2",
+    "auto_adjust": true,
+    "fractal_type": "Mandelbrot",
+    "timestamp": "2026-11-08 20:10:16",
+    "zoom_level": 1.5453264459925081e+31,
+    "max_iterations": 17274,
+    "auto_iterations": 8192
   }
 ]
