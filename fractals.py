@@ -1,4 +1,5 @@
 import numpy as np
+from decimal import localcontext
 from numba import njit, prange
 
 from themes import apply_color_theme
@@ -295,6 +296,16 @@ def fatou_section_jit(
 # error term) and with cache=True.
 _DD_SPLIT = 134217857.0  # 2^27 + 1 (Dekker splitter)
 
+# CPU-only deep backends. "perturb_hp" is the perturbation algorithm fed by
+# the arbitrary-precision view state (hp_view.PreciseBounds) instead of
+# double-double coordinates; it is what renders below DD_EPS.
+DEEP_PRECISIONS = ("double_double", "perturb", "perturb_hp")
+
+
+def is_deep(precision):
+    """True for the CPU-only deep backends (never GPU, never a tile cache)."""
+    return precision in DEEP_PRECISIONS
+
 
 @njit(cache=True)
 def _dd_two_sum(a, b):
@@ -518,12 +529,34 @@ class MandelbrotCalculator:
         c,
         precision,
         dd,
+        hp=None,
     ):
         """CPU deep-zoom dispatch (double-double / perturbation)."""
         x_min_lo, y_min_lo, dx, dy = self._deep_spacings(
             x_min, x_max, y_min, y_max, dd, width, height
         )
         if fractal_type == "mandelbrot":
+            if precision == "perturb_hp":
+                from deep_zoom import calculate_mandelbrot_perturb_hp
+
+                if hp is None:
+                    raise ValueError("perturb_hp needs the hp coordinate payload")
+                counts, stats = calculate_mandelbrot_perturb_hp(
+                    width,
+                    height,
+                    hp["x_min"],
+                    hp["x_max"],
+                    hp["y_min"],
+                    hp["y_max"],
+                    max_iterations,
+                )
+                if stats["unresolved"]:
+                    print(
+                        f"HP perturb: {stats['unresolved']} px unresolved "
+                        f"({stats['direct']} direct-iterated, roots={stats['roots']}, "
+                        f"dps={stats['dps']})"
+                    )
+                return counts
             if precision == "perturb":
                 from deep_zoom import calculate_mandelbrot_perturb
 
@@ -551,6 +584,11 @@ class MandelbrotCalculator:
                 dy,
                 max_iterations,
             )
+        # Deep Julia clamps to double-double (no perturbation kernel for it);
+        # a perturb_hp view arrives here only if the caller bypassed the
+        # viewer's backend selection.
+        if precision == "perturb_hp":
+            precision = "double_double"
         if fractal_type == "julia":
             if c is None:
                 c = complex(-0.7, 0.27015)
@@ -587,6 +625,7 @@ class MandelbrotCalculator:
         c=None,
         precision="float64",
         dd=None,
+        hp=None,
     ):
         """
         Compute the raw int32 iteration array for the full image.
@@ -604,7 +643,7 @@ class MandelbrotCalculator:
         """
         max_iterations = max(1, int(max_iterations))
 
-        if precision in ("double_double", "perturb"):
+        if is_deep(precision):
             return self._compute_deep(
                 fractal_type,
                 width,
@@ -617,6 +656,7 @@ class MandelbrotCalculator:
                 c,
                 precision,
                 dd,
+                hp,
             )
 
         if self._use_gpu:
@@ -695,6 +735,7 @@ class MandelbrotCalculator:
         c=None,
         precision="float64",
         dd=None,
+        hp=None,
     ):
         """
         Calculate the full fractal image in one GPU/CPU call.
@@ -704,9 +745,12 @@ class MandelbrotCalculator:
             fractal_type: 'mandelbrot', 'julia', or 'fatou'
             theme: color theme name, or None to return raw iteration counts
             c: Julia constant (complex), used only for julia type
-            precision: backend, "float32"/"float64"/"double_double"/"perturb"
+            precision: backend,
+                "float32"/"float64"/"double_double"/"perturb"/"perturb_hp"
             dd: (x_min_lo, x_max_lo, y_min_lo, y_max_lo) low parts for deep
                 precision backends
+            hp: {"x_min", "x_max", "y_min", "y_max"} exact decimal strings for
+                the arbitrary-precision perturb band
         """
         iterations = self._compute_iterations(
             fractal_type,
@@ -720,6 +764,7 @@ class MandelbrotCalculator:
             c,
             precision=precision,
             dd=dd,
+            hp=hp,
         )
         if theme is None:
             return iterations
@@ -936,6 +981,56 @@ class MandelbrotCalculator:
             dy,
             max_iterations,
         )
+        if theme is None:
+            return iterations
+        return apply_color_theme(iterations, max_iterations, theme)
+
+    def calculate_mandelbrot_section_perturb_hp(
+        self,
+        section_offset,
+        section_width,
+        width,
+        height,
+        x_min_s,
+        dx_s,
+        y_min_s,
+        dy_s,
+        max_iterations,
+        theme,
+    ):
+        """Perturbation section with arbitrary-precision coordinates (pool worker).
+
+        ``section_offset`` is unused: each section builds reference orbits for
+        its own rectangle. The section's left edge and pitch arrive as exact
+        decimal strings from the canonical view state, and the right edge is
+        ``x_min + section_width * dx`` in Decimal — no double-double addition,
+        which is what quantized deep section stitching before.
+        """
+        from deep_zoom import calculate_mandelbrot_perturb_hp
+        from hp_view import to_decimal
+
+        with localcontext(prec=120) as ctx:
+            x_min = to_decimal(x_min_s)
+            dx = to_decimal(dx_s)
+            x_max = ctx.add(x_min, ctx.multiply(dx, to_decimal(int(section_width))))
+            y_min = to_decimal(y_min_s)
+            dy = to_decimal(dy_s)
+            y_max = ctx.add(y_min, ctx.multiply(dy, to_decimal(int(height))))
+        iterations, stats = calculate_mandelbrot_perturb_hp(
+            section_width,
+            height,
+            str(x_min),
+            str(x_max),
+            str(y_min),
+            str(y_max),
+            max_iterations,
+        )
+        if stats["unresolved"]:
+            print(
+                f"HP section {section_offset}: {stats['unresolved']} px unresolved "
+                f"({stats['direct']} direct, roots={stats['roots']}, "
+                f"dps={stats['dps']})"
+            )
         if theme is None:
             return iterations
         return apply_color_theme(iterations, max_iterations, theme)

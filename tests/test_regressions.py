@@ -921,13 +921,25 @@ def test_title_reports_three_decimal_elapsed_and_fps(app):
 
 def test_title_zoom_shows_full_digits_and_compact_form(app):
     """Deep zooms must show both the full integer expansion and a compact
-    scientific form, so a truncated title still carries the readable value."""
+    scientific form, so a truncated title still carries the readable value.
+
+    The title reads the canonical Decimal zoom, so the full form has no
+    float64 tail (a float 1.5453264459925081e31 expands to
+    …5081369940833861632; the view's own value is exact)."""
+    from decimal import Decimal
+
+    from Fractal_Frontier import zoom_forms
+
     viewer, _ = app
-    viewer.zoom_level = 1.5453264459925081e31
+    viewer._zoom_dec = Decimal("1.5453264459925081e31")
     viewer._update_title(0.004)
     title = viewer.master.title()
     assert "1.54533e+31x" in title
-    assert "15453264459925081369940833861632" in title
+    assert "15453264459925081000000000000000" in title
+    # The float form keeps working for callers that pass a plain zoom.
+    full, compact = zoom_forms(1.5453264459925081e31)
+    assert full == "15453264459925081369940833861632"
+    assert compact == "1.54533e+31"
 
 
 def test_preview_scale_degrades_only_when_frame_budget_is_missed(app):

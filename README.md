@@ -1,6 +1,6 @@
 # Fractal Frontier
 
-**Version:** 1.4
+**Version:** 1.5
 
 ## Overview
 Fractal Frontier is a graphical application that allows users to explore the Mandelbrot set through an interactive interface. Users can zoom in and out, move the view, and apply different color themes to visualize the fractal patterns.
@@ -16,7 +16,7 @@ Fractal Frontier is a graphical application that allows users to explore the Man
 - Responsive panning using a full-resolution raw-iteration tile cache, an asynchronously computed ring of adjacent tiles, and a bounded LRU history for quick direction reversals.
 - Adaptive preview quality: full-resolution previews when the frame budget allows; half or quarter resolution only when a frame misses the budget.
 - Live performance metrics in the title bar: render time to three decimal places and smoothed preview FPS.
-- Deep-zoom backends that replace float64 arithmetic as the pixel pitch approaches its resolution limit: double-double (quad-float) coordinates extend smooth zooming to ~1e30 magnification, and a perturbation-theory mode (mpmath reference orbits + float64 deltas) extends the algorithm beyond that. The viewer still stores bounds and bookmarks as double-double pairs, so once the pixel pitch drops below `DD_EPS` (~2.5e-32) the coordinate state—not the perturbation algorithm—is the practical limit: pixels collapse onto shared coordinates (bookmark 9 at zoom 1.5e31 shows this). Selection is automatic; the status bar shows the active backend, 30-digit coordinates, and the zoom in both full-digit and compact scientific form.
+- Deep-zoom backends that replace float64 arithmetic as the pixel pitch approaches its resolution limit: double-double (quad-float) coordinates extend smooth zooming to ~1e30 magnification, and perturbation theory (mpmath reference orbits + float64 deltas) extends the algorithm beyond that. An arbitrary-precision mode (`perturb_hp`) feeds that same algorithm from the viewer's exact `Decimal` view state, so pixel identity no longer depends on double-double resolution — there is no built-in depth limit. Selection is automatic; the status bar shows the active backend, the coordinate digit count, the actual precision in use, and the zoom in both full-digit and compact scientific form.
 
 ## Project Structure
 ```
@@ -26,6 +26,7 @@ Fractal Frontier/
 ├── gpu_fractals.py               # Numba CUDA kernels and launch configuration
 ├── themes.py                     # Colour themes and palette helpers
 ├── dd_math.py                    # Double-double (quad-float) arithmetic helpers
+├── hp_view.py                    # Arbitrary-precision view state (PreciseBounds)
 ├── deep_zoom.py                  # Perturbation deep-zoom backend (mpmath)
 ├── requirements.txt              # Runtime and development dependencies
 ├── pytest.ini                    # Test configuration and warning policy
@@ -39,6 +40,8 @@ Fractal Frontier/
     ├── test_colors.py            # Theme and colour tests
     ├── test_gpu.py               # GPU-specific tests
     ├── test_deep_zoom.py         # Double-double and perturbation backend tests
+    ├── test_hp_view.py           # Arbitrary-precision view-state unit tests
+    ├── test_hp_integration.py    # View state wired into the viewer
     ├── test_regressions.py       # Regression tests for the viewer and calculator
     ├── test_viewer_functionality.py
     └── test_viewer_integration.py
@@ -102,7 +105,9 @@ make help
 - **Preview quality:** previews start at full resolution. If a measured frame misses the frame budget, the viewer steps down to half or quarter resolution, then recovers after several consecutive cheap frames. The current target is 24 fps.
 - **Title metrics:** the title bar shows settled render time with three decimals and a smoothed preview FPS based on displayed preview-frame intervals.
 
-The tile grid is invalidated on zoom, fractal-type, iteration-count, or canvas-size changes. The LRU history is retained during a drag; a settled full render re-anchors the grid.
+The tile grid is invalidated on zoom, fractal-type, iteration-count, or canvas-size changes. The LRU history is retained during a drag; a settled full render re-anchors the grid. Tile caching and pan-cache cropping are disabled in arbitrary-precision (`perturb_hp`) mode, where their double-double anchors no longer resolve the pixel grid.
+
+Pool workers run with `numba.set_num_threads(1)`: work is already split across processes, so a per-worker thread team only oversubscribes the machine. Each worker still carries roughly 145 MB of Numba/LLVM state, so a full-size pool is a few gigabytes of RAM — it is sized to the number of sections a render actually uses.
 
 Numba may print `NumbaPerformanceWarning` for very small preview images. The 256×256 tiles launch 256 GPU blocks, above Numba's 128-block heuristic, so tile launches no longer trigger it. The test configuration ignores these warnings for the intentionally small probe images.
 
