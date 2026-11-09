@@ -20,10 +20,10 @@ magnifications limited only by the iteration budget and the user's patience
 """
 
 import math
+from decimal import localcontext
 
 import mpmath as mp
 import numpy as np
-from decimal import localcontext
 from numba import njit, prange
 
 from dd_math import DD_EPS, dd_add_d, dd_sub

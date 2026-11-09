@@ -2,15 +2,15 @@
 
 import json
 import math
-
-import pytest
 from contextlib import contextmanager
 from decimal import Decimal, localcontext
 
+import pytest
+
 from dd_math import DD_EPS, dd_add_d, dd_sub, dd_to_double
-from hp_view import (HP_MIN_PRECISION, PreciseBounds, dd_to_decimal, decimal_to_dd,
-                     digit_span, exact_precision, format_decimal, required_precision,
-                     to_decimal)
+from hp_view import (HP_MIN_PRECISION, PreciseBounds, dd_to_decimal,
+                     decimal_to_dd, digit_span, exact_precision,
+                     format_decimal, required_precision, to_decimal)
 
 # Bookmark 9 as stored (the deep-zoom limit case): the hi parts are equal
 # doubles and the entire range lives in the double-double lo parts.
@@ -28,8 +28,14 @@ BM9 = {
 
 def bm9_bounds():
     return PreciseBounds.from_dd(
-        BM9["x_min"], BM9["x_min_lo"], BM9["x_max"], BM9["x_max_lo"],
-        BM9["y_min"], BM9["y_min_lo"], BM9["y_max"], BM9["y_max_lo"],
+        BM9["x_min"],
+        BM9["x_min_lo"],
+        BM9["x_max"],
+        BM9["x_max_lo"],
+        BM9["y_min"],
+        BM9["y_min_lo"],
+        BM9["y_max"],
+        BM9["y_max_lo"],
     )
 
 
@@ -138,8 +144,10 @@ def test_lerp_endpoints_and_monotonicity():
     start = PreciseBounds.from_floats(-2.0, 1.0, -1.5, 1.5)
     target = start.copy().scale_around(to_decimal(-0.5), to_decimal(0.0), 0.5)
     mid = start.lerp(target, 0.5)
-    assert rel_diff(mid.range_x(),
-                       (start.range_x() + target.range_x()) / to_decimal(2)) < 1e-12
+    assert (
+        rel_diff(mid.range_x(), (start.range_x() + target.range_x()) / to_decimal(2))
+        < 1e-12
+    )
     assert mid.precision >= max(start.precision, target.precision)
     assert start.lerp(target, 0).x_min == start.x_min
     assert start.lerp(target, 1).x_min == target.x_min
@@ -159,8 +167,9 @@ def test_section_start_is_the_exact_column_edge():
     for offset in (0, 137, 300, 599):
         edge = to_decimal(bounds.section_start_x(offset, width))
         with wide() as ctx:
-            expected = ctx.add(bounds.x_min,
-                               ctx.multiply(bounds.pitch(width), to_decimal(offset)))
+            expected = ctx.add(
+                bounds.x_min, ctx.multiply(bounds.pitch(width), to_decimal(offset))
+            )
         assert rel_diff(edge, expected) < 1e-25
 
 

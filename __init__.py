@@ -5,14 +5,9 @@ This application provides a GUI for exploring the Mandelbrot set fractal with va
 color themes, zoom capabilities, and bookmark functionality.
 """
 
-from fractals import (
-    MandelbrotCalculator,
-    fatou_section_jit,
-    julia_section_dd_jit,
-    julia_section_jit,
-    mandelbrot_section_dd_jit,
-    mandelbrot_section_jit,
-)
+from fractals import (MandelbrotCalculator, fatou_section_jit,
+                      julia_section_dd_jit, julia_section_jit,
+                      mandelbrot_section_dd_jit, mandelbrot_section_jit)
 from hp_view import PreciseBounds
 from themes import apply_color_theme
 

@@ -9,11 +9,11 @@ gating, and the bookmark format.
 import json
 import os
 import sys
+from decimal import Decimal, localcontext
 
 import mpmath as mp
 import numpy as np
 import pytest
-from decimal import Decimal, localcontext
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 
@@ -99,8 +99,12 @@ def test_dd_mirror_reads_and_writes_flow_into_canonical_state(viewer):
 
 def test_mirror_survives_the_deep_bookmark_layout(viewer):
     """Bookmark 9's shape: equal hi parts, the whole range in the lo parts."""
-    viewer._set_bounds(-0.7454642792047881, -0.7454642792047881,
-                       0.10700158801025167, 0.10700158801025167)
+    viewer._set_bounds(
+        -0.7454642792047881,
+        -0.7454642792047881,
+        0.10700158801025167,
+        0.10700158801025167,
+    )
     viewer.x_min_lo = -9.789304372927869e-18
     viewer.x_max_lo = -9.789304372927675e-18
     viewer.y_min_lo = 2.798855395978615e-18
@@ -262,8 +266,10 @@ def test_hp_perturb_matches_direct_iteration_exact_at_deep_pitch():
         half_x = ctx.multiply(to_decimal("1e-34"), to_decimal(w // 2))
         half_y = ctx.multiply(to_decimal("1e-34"), to_decimal(h // 2))
         bounds = ff.PreciseBounds(
-            ctx.subtract(cx, half_x), ctx.add(cx, half_x),
-            ctx.subtract(cy, half_y), ctx.add(cy, half_y),
+            ctx.subtract(cx, half_x),
+            ctx.add(cx, half_x),
+            ctx.subtract(cy, half_y),
+            ctx.add(cy, half_y),
         )
     assert bounds.pitch(w) == pytest.approx(to_decimal("1e-34"), rel=1e-12)
     counts, stats = calculate_mandelbrot_perturb_hp(
@@ -273,8 +279,9 @@ def test_hp_perturb_matches_direct_iteration_exact_at_deep_pitch():
     assert (counts >= 0).all(), "unresolved pixels left in the HP band"
     assert stats["unresolved"] == 0
 
-    truth = np.array(_direct_counts(_grid_pixels(bounds, w, h), max_iterations, 70),
-                     dtype=np.int32).reshape(h, w)
+    truth = np.array(
+        _direct_counts(_grid_pixels(bounds, w, h), max_iterations, 70), dtype=np.int32
+    ).reshape(h, w)
     assert (counts == truth).all(), (
         f"HP perturb differs from direct iteration on "
         f"{int((counts != truth).sum())} of {w * h} pixels"
@@ -307,9 +314,9 @@ def test_hp_section_starts_do_not_collapse_across_the_frame():
     hi, lo = bounds.to_dd()[:2]
     dx_f = float(bounds.range_x()) / 1200
     dd_lit = {float(dd_add_d(hi, lo, off * dx_f)[0]) for off in range(1200)}
-    assert len(dd_lit) < 200, (
-        f"expected float64 section starts to collapse; got {len(dd_lit)}"
-    )
+    assert (
+        len(dd_lit) < 200
+    ), f"expected float64 section starts to collapse; got {len(dd_lit)}"
 
 
 @pytest.mark.timeout(600)
@@ -359,9 +366,16 @@ def test_hp_sections_stitch_without_seams():
     for section_width in (6, 6, 6, 6):
         start = bounds.section_start_x(offset, w)
         piece = calc.calculate_mandelbrot_section_perturb_hp(
-            offset, section_width, w, h, start, dx_s,
+            offset,
+            section_width,
+            w,
+            h,
+            start,
+            dx_s,
             str(bounds.y_min),
-            dy_s, max_iterations, None,
+            dy_s,
+            max_iterations,
+            None,
         )
         pieces.append(piece)
         offset += section_width
@@ -469,8 +483,9 @@ def test_bookmark_stores_hp_fields_and_round_trips(viewer, tmp_path, monkeypatch
     assert restored.precision == viewer.bounds.precision
 
 
-def test_legacy_bookmark_load_reports_the_precision_floor(viewer, tmp_path,
-                                                          monkeypatch):
+def test_legacy_bookmark_load_reports_the_precision_floor(
+    viewer, tmp_path, monkeypatch
+):
     bm_file = tmp_path / "bookmarks.json"
     monkeypatch.setattr(ff, "BOOKMARKS_FILE", str(bm_file))
     legacy_bm = {
@@ -502,10 +517,7 @@ def test_status_bar_reports_coordinate_digit_count(viewer):
     viewer._render_precision = "perturb_hp"
     viewer.max_iterations = 100
     coords = viewer.bounds.coord_strings(significant=40)
-    text = (
-        f"{viewer.bounds.precision}-digit coords | "
-        f"X_min: {coords['x_min']}"
-    )
+    text = f"{viewer.bounds.precision}-digit coords | " f"X_min: {coords['x_min']}"
     assert "digit coords" in text
     assert len(coords["x_min"].split(".")[1]) >= 33
     assert viewer._render_precision == "perturb_hp"

@@ -5,8 +5,17 @@ Provides JIT-compiled CUDA kernels for Mandelbrot, Julia, and Fatou sets
 that run on the GPU for 10-100x speedup over CPU-only approaches.
 """
 
+import threading
+
 import numpy as np
 from numba import cuda
+
+# Every GPU entry point takes this lock. Two threads dispatch work here: the
+# Tk main thread (settled full frames) and the viewer's render-worker thread
+# (256x256 pan-cache tiles). Numba's CUDA driver is not safe to drive from two
+# threads at once, and a cached device buffer replaced mid-launch could be
+# freed inside a driver call, which aborts the interpreter.
+_GPU_LOCK = threading.RLock()
 
 # --------------------------------------------------------------------------
 # CUDA KERNELS - Run on GPU
@@ -335,25 +344,77 @@ class GPUCalculator:
         except AttributeError:
             # Newer Numba versions may not expose this attribute
             pass
-        # One reusable device buffer per size.  A render is single-threaded,
-        # and copy_to_host synchronises before returning, so reuse is safe.
-        self._d_result = None
-        self._d_shape = None
+        # Reusable device buffers keyed by shape. Tiles (256x256) and full
+        # frames (canvas sized) are requested concurrently from different
+        # threads, so a single slot would evict the other thread's buffer
+        # mid-launch. Bounded, because the layout can change on every resize.
+        self._d_results = {}
+        self._d_shapes = []
+        self._precompile()
+
+    def _precompile(self):
+        """Compile every kernel once, on the thread that built this object.
+
+        Kernel compilation is the expensive part of a first launch, and doing
+        it lazily lets the viewer's render-worker thread trigger a compile
+        while the Tk thread is busy. Compiling up front keeps first-render
+        latency predictable and keeps compilation off the worker thread.
+        """
+        grid, block = (1, 1), (1, 1)
+        buf = cuda.device_array((1, 1), dtype=np.int32)
+        try:
+            for cast, kernels in (
+                (np.float64, (mandelbrot_kernel, julia_kernel, fatou_kernel)),
+                (
+                    np.float32,
+                    (mandelbrot_kernel_f32, julia_kernel_f32, fatou_kernel_f32),
+                ),
+            ):
+                for kernel in kernels:
+                    # The Julia kernels take the constant c as (cr, ci).
+                    tail = (0.0, 0.0) if "julia" in kernel.py_func.__name__ else ()
+                    # One thread in one block is enough to force a compile.
+                    kernel[grid, block](
+                        buf,
+                        cast(0.0),
+                        cast(1.0),
+                        cast(0.0),
+                        cast(1.0),
+                        1,
+                        1,
+                        1,
+                        *(cast(v) for v in tail),
+                    )
+        except Exception as exc:  # pragma: no cover - best-effort warmup
+            print(f"WARNING: GPU kernel precompile failed ({exc!r})")
+        finally:
+            del buf
 
     @staticmethod
     def _validate_precision(precision):
         if precision not in ("float32", "float64"):
             raise ValueError(f"Unknown GPU precision: {precision!r}")
 
+    MAX_CACHED_SHAPES = 4
+
     def _get_device_result(self, height, width):
-        """Return a reusable uninitialised int32 device buffer."""
+        """Return a reusable uninitialised int32 device buffer for this shape.
+
+        One buffer per live shape, so a 256x256 tile request cannot evict the
+        device buffer of a concurrent full-frame render.
+        """
         shape = (int(height), int(width))
-        if self._d_shape != shape:
+        buf = self._d_results.get(shape)
+        if buf is None:
             # The kernel writes every valid pixel, so no zero-initialisation
             # or host->device copy is needed.
-            self._d_result = cuda.device_array(shape, dtype=np.int32)
-            self._d_shape = shape
-        return self._d_result
+            buf = cuda.device_array(shape, dtype=np.int32)
+            self._d_results[shape] = buf
+            self._d_shapes.append(shape)
+            while len(self._d_shapes) > self.MAX_CACHED_SHAPES:
+                stale = self._d_shapes.pop(0)
+                self._d_results.pop(stale, None)
+        return buf
 
     @staticmethod
     def _grid(width, height):
@@ -365,7 +426,7 @@ class GPUCalculator:
         blocks_per_grid_y = (height + threads_per_block[1] - 1) // threads_per_block[1]
         return (blocks_per_grid_x, blocks_per_grid_y), threads_per_block
 
-    def calculate_mandelbrot_gpu(
+    def _calculate_mandelbrot_gpu_unlocked(
         self,
         width,
         height,
@@ -413,7 +474,7 @@ class GPUCalculator:
         d_result.copy_to_host(h_result)
         return h_result
 
-    def calculate_julia_gpu(
+    def _calculate_julia_gpu_unlocked(
         self,
         width,
         height,
@@ -463,7 +524,7 @@ class GPUCalculator:
         d_result.copy_to_host(h_result)
         return h_result
 
-    def calculate_fatou_gpu(
+    def _calculate_fatou_gpu_unlocked(
         self,
         width,
         height,
@@ -507,3 +568,27 @@ class GPUCalculator:
 
         d_result.copy_to_host(h_result)
         return h_result
+
+
+def _locked(name, inner):
+    """Build a public GPU entry point that serialises access to the driver."""
+
+    def entry(self, *args, **kwargs):
+        with _GPU_LOCK:
+            return inner(self, *args, **kwargs)
+
+    entry.__name__ = name
+    entry.__qualname__ = f"GPUCalculator.{name}"
+    entry.__doc__ = inner.__doc__
+    return entry
+
+
+GPUCalculator.calculate_mandelbrot_gpu = _locked(
+    "calculate_mandelbrot_gpu", GPUCalculator._calculate_mandelbrot_gpu_unlocked
+)
+GPUCalculator.calculate_julia_gpu = _locked(
+    "calculate_julia_gpu", GPUCalculator._calculate_julia_gpu_unlocked
+)
+GPUCalculator.calculate_fatou_gpu = _locked(
+    "calculate_fatou_gpu", GPUCalculator._calculate_fatou_gpu_unlocked
+)

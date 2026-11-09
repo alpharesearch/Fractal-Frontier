@@ -24,14 +24,8 @@ from PIL import Image, ImageTk
 
 from dd_math import DD_EPS, dd_add_d, dd_format, dd_sub, dd_to_double
 from fractals import GPU_AVAILABLE, MandelbrotCalculator, is_deep
-from hp_view import (
-    PreciseBounds,
-    dd_to_decimal,
-    decimal_to_dd,
-    exact_precision,
-    format_decimal,
-    to_decimal,
-)
+from hp_view import (PreciseBounds, dd_to_decimal, decimal_to_dd,
+                     exact_precision, format_decimal, to_decimal)
 from themes import apply_color_theme
 
 # Bookmarks live next to the script (not in whatever CWD the app was
@@ -119,25 +113,6 @@ TILE_CACHE_LIMIT = 384
 # (e.g. seeded from params for a different depth). Ranges beyond it are
 # treated as "no tiles" rather than enumerated.
 TILE_SPAN_MAX = 4096
-
-
-def _init_worker():
-    """Cap Numba's intra-process thread pool inside a render worker.
-
-    Work is already split *across* processes (one section per worker), so a
-    worker running an ``@njit(parallel=True)`` kernel with the default
-    one-thread-per-core pool oversubscribes the machine and gives every
-    worker its own thread team and scheduler buffers: measured at ~140 MB
-    extra per worker (4.8 GB across a 32-worker pool for a 1024x768 frame),
-    in exchange for no throughput. Must run before the worker touches any
-    JIT kernel, which is why it is a pool initializer.
-    """
-    try:
-        import numba
-
-        numba.set_num_threads(1)
-    except Exception:  # pragma: no cover - numba is a hard dependency
-        pass
 
 
 # Status-bar busy indicator: while a render request is in flight the
@@ -459,10 +434,7 @@ class MandelbrotViewer:
             multiprocessing.set_start_method("spawn", force=True)
         # A render never submits more than 32 section tasks, so a pool
         # larger than 32 only spawns workers that can never get work.
-        self.pool = multiprocessing.Pool(
-            processes=max(1, min(self.num_cores, 32)),
-            initializer=_init_worker,
-        )
+        self.pool = multiprocessing.Pool(processes=max(1, min(self.num_cores, 32)))
         self.calculator = MandelbrotCalculator()  # Reintroduce the calculator
         self.resize_job = None
 

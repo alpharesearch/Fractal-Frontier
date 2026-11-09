@@ -35,9 +35,9 @@ Two Decimal traps this module exists to absorb:
 """
 
 import math
+from decimal import Decimal, localcontext
 
 import numpy as np
-from decimal import Decimal, localcontext
 
 # ---------------------------------------------------------------------------
 # Precision policy

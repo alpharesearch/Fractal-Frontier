@@ -1,5 +1,6 @@
-import numpy as np
 from decimal import localcontext
+
+import numpy as np
 from numba import njit, prange
 
 from themes import apply_color_theme
