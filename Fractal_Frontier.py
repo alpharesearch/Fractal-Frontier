@@ -1962,7 +1962,9 @@ class MandelbrotViewer:
             self.x_max_lo = float(bm.get("x_max_lo", 0.0))
             self.y_min_lo = float(bm.get("y_min_lo", 0.0))
             self.y_max_lo = float(bm.get("y_max_lo", 0.0))
-            if not (self.x_min < self.x_max and self.y_min < self.y_max):
+            # Deep bookmarks can have equal hi parts (range lives in the DD
+            # lo parts); validate the double-double range, not the hi order.
+            if not (self._view_range_x() > 0 and self._view_range_y() > 0):
                 messagebox.showerror(
                     "Invalid Bookmark", "This bookmark has invalid view bounds."
                 )
