@@ -51,6 +51,20 @@ GPU_FLOAT32_MAX_ZOOM = 10.0
 # DEEP_MARGIN = pixels of headroom before quantization bands appear.
 DEEP_MARGIN = 64.0
 
+
+def zoom_forms(zoom):
+    """Return (full fixed-point digits, compact scientific-ish notation).
+
+    The fixed form keeps every integer digit of very deep zooms (no exponent),
+    while the compact form stays readable when the title bar truncates the
+    full number.  Two decimals are kept for shallow zooms.
+    """
+    full = f"{zoom:.2f}"
+    if full.endswith(".00"):
+        full = full[:-3]
+    return full, f"{zoom:.6g}"
+
+
 # Interactive preview settings.  The overscan fallback renders at quarter
 # resolution over a 3x-viewport region when the tile cache is unavailable.
 PAN_PREVIEW_SCALE = 0.25
@@ -1670,9 +1684,10 @@ class MandelbrotViewer:
         if elapsed is not None:
             self._title_elapsed = elapsed
         fps = "--" if self._fps is None else f"{self._fps:.1f}"
+        zoom_full, zoom_compact = zoom_forms(self.zoom_level)
         title_str = (
             f"{self.app_name} | {self._title_elapsed:.3f}s | FPS: {fps} | "
-            + f"{self.zoom_level:.2f}x | Iter: {self.max_iterations} "
+            + f"Zoom: {zoom_compact}x ({zoom_full}) | Iter: {self.max_iterations} "
             + f"(Base: {self.auto_iterations} + Off: {self.iteration_offset}) "
             + f"| Theme: {self.color_theme}"
         )
@@ -1799,7 +1814,9 @@ class MandelbrotViewer:
             backend = f"Cores: {num_sections}"
         self._update_title(elapsed)
 
+        zoom_full, zoom_compact = zoom_forms(self.zoom_level)
         coord_str = (
+            f"Zoom: {zoom_full} ({zoom_compact}x) | "
             f"X_min: {dd_format(self.x_min, self.x_min_lo, 30)}, "
             f"X_max: {dd_format(self.x_max, self.x_max_lo, 30)} | "
             f"Y_min: {dd_format(self.y_min, self.y_min_lo, 30)}, "
@@ -1937,11 +1954,12 @@ class MandelbrotViewer:
                     float(bm.get(key, default)), float(bm.get(key + "_lo", 0.0)), 24
                 )
 
+            zoom_full, zoom_compact = zoom_forms(float(bm.get("zoom_level", 1.0)))
             summary = (
                 f"{index+1}: {bm.get('timestamp', 'no date')} | "
                 f"Fractal: {bm.get('fractal_type', 'Mandelbrot')} | "
                 f"Theme: {bm.get('color_theme', 'Default')} | "
-                f"Zoom: {float(bm.get('zoom_level', 1.0)):.2f}x | "
+                f"Zoom: {zoom_full} ({zoom_compact}x) | "
                 f"Auto Adj: {bm.get('auto_adjust', True)} | "
                 f"Iter_Offset: {bm.get('iteration_offset', 0)} | "
                 f"Auto Iter: {bm.get('auto_iterations', 0)} | "

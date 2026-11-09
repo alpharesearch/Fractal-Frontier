@@ -16,7 +16,7 @@ Fractal Frontier is a graphical application that allows users to explore the Man
 - Responsive panning using a full-resolution raw-iteration tile cache, an asynchronously computed ring of adjacent tiles, and a bounded LRU history for quick direction reversals.
 - Adaptive preview quality: full-resolution previews when the frame budget allows; half or quarter resolution only when a frame misses the budget.
 - Live performance metrics in the title bar: render time to three decimal places and smoothed preview FPS.
-- Deep-zoom backends that replace float64 arithmetic as the pixel pitch approaches its resolution limit: double-double (quad-float) coordinates extend smooth zooming to ~1e30 magnification, and a perturbation-theory mode (mpmath reference orbits + float64 deltas) goes essentially beyond that. Selection is automatic; the status bar shows the active backend and 30-digit coordinates.
+- Deep-zoom backends that replace float64 arithmetic as the pixel pitch approaches its resolution limit: double-double (quad-float) coordinates extend smooth zooming to ~1e30 magnification, and a perturbation-theory mode (mpmath reference orbits + float64 deltas) extends the algorithm beyond that. The viewer still stores bounds and bookmarks as double-double pairs, so once the pixel pitch drops below `DD_EPS` (~2.5e-32) the coordinate state—not the perturbation algorithm—is the practical limit: pixels collapse onto shared coordinates (bookmark 9 at zoom 1.5e31 shows this). Selection is automatic; the status bar shows the active backend, 30-digit coordinates, and the zoom in both full-digit and compact scientific form.
 
 ## Project Structure
 ```

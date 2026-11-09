@@ -919,6 +919,17 @@ def test_title_reports_three_decimal_elapsed_and_fps(app):
     assert "FPS: 59.9" in title
 
 
+def test_title_zoom_shows_full_digits_and_compact_form(app):
+    """Deep zooms must show both the full integer expansion and a compact
+    scientific form, so a truncated title still carries the readable value."""
+    viewer, _ = app
+    viewer.zoom_level = 1.5453264459925081e31
+    viewer._update_title(0.004)
+    title = viewer.master.title()
+    assert "1.54533e+31x" in title
+    assert "15453264459925081369940833861632" in title
+
+
 def test_preview_scale_degrades_only_when_frame_budget_is_missed(app):
     """The adaptive controller keeps full resolution unless a frame is slow."""
     from Fractal_Frontier import FRAME_BUDGET_MS
