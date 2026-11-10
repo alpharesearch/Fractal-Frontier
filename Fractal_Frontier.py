@@ -13,6 +13,7 @@ import platform
 import queue
 import random
 import threading
+import traceback
 import time
 import tkinter as tk
 from collections import OrderedDict
@@ -986,7 +987,10 @@ class MandelbrotViewer:
             try:
                 full_array = self._compute_full(params)
             except Exception as exc:  # never kill the worker thread
+                # repr() alone says nothing about *where* a render broke; the
+                # traceback is what makes a reported failure actionable.
                 print(f"Render error (seq {seq}): {exc!r}")
+                traceback.print_exc()
                 self._result_queue.put(("error", (seq, repr(exc), params)))
                 continue
             elapsed = time.time() - start_time
