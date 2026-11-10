@@ -223,6 +223,20 @@ def _hp_direct_counts(pairs, dps, max_iterations):
     return out
 
 
+def _rank_unresolved(counts, switches, budget):
+    """Indices of the ``budget`` unresolved pixels with the strongest switch.
+
+    Returns flat integer row/column arrays. The score is flattened before
+    sorting on purpose: ``np.argsort`` on a 2-D array sorts along the last
+    axis and returns a 2-D result, which selects the wrong pixels (a whole
+    row's worth per rank) and yields arrays instead of integers when
+    unpacked as indices.
+    """
+    score = np.where(counts == -1, switches, -np.inf).ravel()
+    order = np.argsort(-score)[: int(budget)]
+    return np.unravel_index(order, counts.shape)
+
+
 def calculate_mandelbrot_perturb_hp(
     width,
     height,
@@ -315,8 +329,7 @@ def calculate_mandelbrot_perturb_hp(
         # exactly the quantization this module removes, so the hardest
         # unresolved pixels are iterated directly in multi-precision.
         budget = min(n_unresolved, max(0, int(direct_budget)))
-        order = np.argsort(-np.where(counts == -1, switches, -np.inf))[:budget]
-        rows, cols = np.unravel_index(order, (height, width))
+        rows, cols = _rank_unresolved(counts, switches, budget)
         values = _hp_direct_counts(
             [(px_str[j], py_str[i]) for i, j in zip(rows, cols)], dps, max_iterations
         )

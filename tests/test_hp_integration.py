@@ -605,3 +605,54 @@ def test_viewer_pool_is_reaped_on_close():
         v._close_app()  # idempotent
     finally:
         root.destroy()
+
+
+def test_unresolved_ranking_selects_pixels_not_rows():
+    """The fallback must pick `budget` pixels, whichever shape the section is.
+
+    Ranking used np.argsort on the 2-D score, which sorts along the last axis
+    and returns a 2-D result; unpacking that as indices raised "only integer
+    scalar arrays can be converted to a scalar index" and made deep bookmarks
+    unloadable. A tall, narrow section (37 columns is what the viewer uses at
+    1200 px) is where it bit.
+    """
+    from deep_zoom import _rank_unresolved
+
+    h, w = 20, 37
+    counts = np.full((h, w), -1, dtype=np.int32)
+    counts[3, 7] = 50  # already settled
+    switches = np.linspace(0.0, 1.0, h * w).reshape(h, w)
+    switches[3, 7] = 999.0  # settled pixel has the strongest signal
+
+    rows, cols = _rank_unresolved(counts, switches, 5)
+    assert np.shape(rows) == (5,), f"expected 5 pixel rows, got {np.shape(rows)}"
+    assert np.shape(cols) == (5,), f"expected 5 pixel cols, got {np.shape(cols)}"
+    for r, c in zip(rows, cols):
+        assert np.issubdtype(np.asarray(r).dtype, np.integer)
+        assert counts[r, c] == -1, "a settled pixel was selected"
+    # Highest switch signal first.
+    assert (rows[0], cols[0]) != (3, 7)
+    picked = [switches[r, c] for r, c in zip(rows, cols)]
+    assert picked == sorted(picked, reverse=True)
+
+
+def test_unresolved_ranking_is_capped_by_the_budget():
+    from deep_zoom import _rank_unresolved
+
+    counts = np.full((20, 37), -1, dtype=np.int32)
+    switches = np.zeros((20, 37))
+    rows, cols = _rank_unresolved(counts, switches, 1)
+    assert len(np.atleast_1d(rows)) == 1
+
+
+def test_hp_fallback_budget_is_a_pixel_count_not_a_row_count():
+    """The fallback spends its budget on pixels, never a multiple of it."""
+    w, h = 37, 20
+    max_iterations = 400
+    bounds = deep_view("1e-34", w, h)
+    counts, stats = calculate_mandelbrot_perturb_hp(
+        w, h, *bounds.to_strings(), max_iterations, direct_budget=5
+    )
+    assert counts.shape == (h, w)
+    assert stats["direct"] <= 5, f"budget overspent: {stats['direct']} > 5"
+    assert (counts >= 0).all()
