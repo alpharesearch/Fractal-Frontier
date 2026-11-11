@@ -9,9 +9,11 @@ At extreme magnifications the double-double backend also runs out of bits
 2. Every pixel is ``c0 + δ`` with δ in plain float64 and iterates the delta
    recurrence ``δ_{n+1} = δ_n² + 2·z_n·δ_n + δ_0`` — two complex multiplies
    per step, no big-number arithmetic.
-3. When a pixel's δ grows past the switching test (|δ| > 1e-6·|z|) it is
-   *re-rooted*: a new reference orbit is built at the worst offender's
-   centre and surrounding pixels are iterated against it.
+3. When a pixel's perturbed iterate ``z_n + δ_n`` suffers catastrophic
+   cancellation (Pauldelbrot's glitch criterion ``|z_n + δ_n| < 1e-3·|z_n|``)
+   or outlives an early-escaping reference orbit, it is *re-rooted*: a new
+   reference orbit is built at the worst unresolved pixel and remaining
+   pixels are iterated against it.
 4. Anything still unresolved falls back to the double-double kernel.
 
 This is the classic Deep Zoom Algorithm. It extends smooth rendering to
@@ -20,6 +22,7 @@ magnifications limited only by the iteration budget and the user's patience
 """
 
 import math
+import os
 from decimal import localcontext
 
 import mpmath as mp
@@ -34,8 +37,9 @@ from hp_view import decimal_to_dd, exact_precision, to_decimal
 # the centre stay covered; pixel counts use the classic |z| > 2 threshold.
 _REFERENCE_BAILOUT2 = 1e16
 _ESCAPE_RADIUS2 = 4.0
-# Switching test: |δ|² > SWITCH_RATIO2 · |z|²  (|δ| > 1e-6·|z|).
-SWITCH_RATIO2 = 1e-12
+# Pauldelbrot glitch test: |z_n + δ_n|² < SWITCH_RATIO2 · |z_n|²
+# (|z_n + δ_n| < 1e-3·|z_n| indicates float64 cancellation between z_n and δ_n).
+SWITCH_RATIO2 = 1e-6
 # Reference rebuilds per section before the fallback takes over.
 MAX_ROOTS = 12
 # Arbitrary-precision band: more re-roots (each is one reference orbit, cheap
@@ -53,6 +57,63 @@ HP_DIRECT_BUDGET = 256
 def _dd_to_mpf(hi, lo):
     """Exact mpmath value of a double-double (float→mpf conversion is exact)."""
     return mp.mpf(float(hi)) + mp.mpf(float(lo))
+
+
+# --------------------------------------------------------------------------
+# Precision backend selection
+# --------------------------------------------------------------------------
+# mpmath uses gmpy2's GMP/MPFR bindings when they are importable, which makes
+# the reference-orbit builder ~1.3x faster (a 250-digit, 4000-iteration orbit
+# takes 8.2 ms instead of 10.8 ms). Per-pixel work is float64 Numba either way
+# and is unaffected, so the saving is a few tens of milliseconds per re-root.
+#
+# DO NOT ADD gmpy2 TO THE ENVIRONMENT. It aborts the interpreter in this
+# process model: measured 4 aborts in 5 full-suite runs with gmpy2 installed
+# versus 0 in 3 without it. The abort lands in a CUDA kernel launch
+# (``launch_kernel`` -> ``safe_cuda_api_call``) with "Garbage-collecting" as
+# the current frame, from the viewer's render thread. It could not be
+# reproduced in isolation (gmpy2 imported under a live CUDA context, 2000
+# mpmath iterations at 160 dps, pool churn, and 60 kernel launches with
+# deliberate GC churn all survived), so the exact trigger is still unknown.
+#
+# The architectural intent is right -- ``_compute_iterations`` routes every
+# ``is_deep()`` precision to ``_compute_deep`` before the GPU branch is
+# consulted, so deep renders never launch GPU kernels -- but that is not
+# sufficient to make gmpy2 safe, because importing ``numba.cuda`` creates a
+# CUDA context at import time whenever a GPU is present. Guarding on
+# "no context yet" would therefore reject every run on a machine with a GPU.
+#
+# The helpers below exist so the choice is visible and testable, and the
+# environment variable lets a CPU-only session opt out without uninstalling.
+_ACCELERATOR_ENV = "FRACTAL_PRECISION_ACCELERATOR"
+
+
+def precision_backend():
+    """Name of the mpmath/libmp backend in use ('gmpy' or 'python')."""
+    try:
+        from mpmath.libmp import backend as _libmp_backend
+
+        return _libmp_backend.BACKEND
+    except Exception:  # pragma: no cover - mpmath always provides it
+        return "python"
+
+
+def precision_accelerated():
+    """True when reference orbits run on GMP/MPFR instead of pure Python.
+
+    Asked of mpmath itself rather than guessed from a version string: the
+    backend name is ``"gmpy"`` (not ``"gmp"``) and it is only meaningful if
+    the module actually bound gmpy2.
+    """
+    forced = os.environ.get(_ACCELERATOR_ENV, "").strip().lower()
+    if forced in ("0", "off", "none", "python"):
+        return False
+    try:
+        from mpmath.libmp import backend as _libmp_backend
+
+        return _libmp_backend.gmpy is not None
+    except Exception:  # pragma: no cover - mpmath always provides it
+        return False
 
 
 def digits_for_pitch(pitch, extra=5, cap=150):
@@ -144,24 +205,28 @@ def _perturb_counts_jit(
                 zi = zs_i[n]
                 tr = zr + dr
                 ti = zi + di
-                if tr * tr + ti * ti > _ESCAPE_RADIUS2:
+                t2 = tr * tr + ti * ti
+                if t2 > _ESCAPE_RADIUS2:
                     counts[i, j] = n
                     break
                 z2 = zr * zr + zi * zi
-                d2 = dr * dr + di * di
-                # n == 0 has z_0 == 0, so the relative test would flag every
-                # non-zero delta; skip it and start comparing at z_1.
-                if n > 0 and d2 > SWITCH_RATIO2 * z2:
-                    switches[i, j] = d2
+                # n == 0 has z_0 == 0; start checking for cancellation at z_1.
+                if n > 0 and t2 < SWITCH_RATIO2 * z2:
+                    switches[i, j] = z2 / max(t2, 1e-300)
                     break
                 nr = dr * dr - di * di + 2.0 * (zr * dr - zi * di) + a0r
                 ni = 2.0 * dr * di + 2.0 * (zr * di + zi * dr) + a0i
                 dr = nr
                 di = ni
                 n += 1
-            if n >= zs_len or n >= max_iterations:
-                # Reference ended with |δ| still small: interior pixel.
-                counts[i, j] = max_iterations
+            if counts[i, j] == -1 and switches[i, j] == 0.0:
+                if n >= max_iterations:
+                    # Reached the iteration ceiling without escaping: interior.
+                    counts[i, j] = max_iterations
+                else:
+                    # Reference orbit escaped early (n == zs_len < max_iterations)
+                    # before this pixel escaped; re-root for a longer reference.
+                    switches[i, j] = max(dr * dr + di * di, 1e-300)
     return counts, switches
 
 
@@ -407,11 +472,13 @@ def calculate_mandelbrot_perturb(
         counts[counts == -1] = new_counts[counts == -1]
         if not np.any(counts == -1):
             return counts
-        # Re-root at the pixel that tripped the switching test hardest.
-        flat = int(np.argmax(switches))
-        i_w, j_w = np.unravel_index(flat, switches.shape)
-        if switches[i_w, j_w] <= 0.0:
+        # Re-root at the worst *unresolved* pixel that tripped the glitch test.
+        unresolved = counts == -1
+        score = np.where(unresolved, switches, -np.inf)
+        flat = int(np.argmax(score))
+        if not np.isfinite(score.flat[flat]) or score.flat[flat] <= 0.0:
             break  # no switch signal left: let the DD fallback resolve
+        i_w, j_w = np.unravel_index(flat, switches.shape)
         cx_hi, cx_lo = dd_add_d(cx_hi, cx_lo, d0r[j_w])
         cy_hi, cy_lo = dd_add_d(cy_hi, cy_lo, d0i[i_w])
         for j in range(width):

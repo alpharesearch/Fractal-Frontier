@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) + "/..")
 from dd_math import (DD_EPS, dd_add_d, dd_center, dd_format, dd_sub,
                      dd_to_double, two_prod, two_sum)
 from deep_zoom import (build_reference, calculate_mandelbrot_perturb,
-                       digits_for_pitch)
+                       digits_for_pitch, precision_accelerated,
+                       precision_backend)
 from fractals import (MandelbrotCalculator, julia_section_dd_jit,
                       julia_section_jit, mandelbrot_section_dd_jit)
 
@@ -355,11 +356,12 @@ def test_viewer_deep_zoom_keeps_exact_range():
 
     root = tk.Tk()
     root.withdraw()
+    viewer = None
     try:
         from Fractal_Frontier import MandelbrotViewer
 
-        viewer = MandelbrotViewer(root)
-        with patch.object(viewer, "draw_mandelbrot", lambda *a, **k: None):
+        with patch.object(MandelbrotViewer, "draw_mandelbrot", lambda *a, **k: None):
+            viewer = MandelbrotViewer(root)
 
             class KbdEvent:
                 type = "2"
@@ -382,6 +384,8 @@ def test_viewer_deep_zoom_keeps_exact_range():
             viewer._shift_bounds(0.7 * pitch, 0.0)
             assert viewer.x_min_lo != 0.0
     finally:
+        if viewer is not None:
+            viewer._close_app()
         root.destroy()
 
 
@@ -397,11 +401,12 @@ def test_viewer_bookmark_roundtrip_keeps_low_parts(tmp_path, monkeypatch):
 
     root = tk.Tk()
     root.withdraw()
+    viewer = None
     try:
         from Fractal_Frontier import MandelbrotViewer
 
-        viewer = MandelbrotViewer(root)
-        with patch.object(viewer, "draw_mandelbrot", lambda *a, **k: None):
+        with patch.object(MandelbrotViewer, "draw_mandelbrot", lambda *a, **k: None):
+            viewer = MandelbrotViewer(root)
             # Craft a deep state: at 1e-17 pitch the hi parts round to the
             # same double (ulp is coarser), so the range lives in the lo
             # parts — exactly what the DD state represents.
@@ -433,4 +438,98 @@ def test_viewer_bookmark_roundtrip_keeps_low_parts(tmp_path, monkeypatch):
             viewer.y_max_lo = float(bm["y_max_lo"])
             assert abs(viewer._view_range_x() - 1e-17) < 1e-24
     finally:
+        if viewer is not None:
+            viewer._close_app()
         root.destroy()
+
+
+def test_precision_backend_is_reported_consistently():
+    """The accelerator switch must describe mpmath's real backend.
+
+    gmpy2 is deliberately excluded from this project's environment: it aborts
+    the interpreter in the full suite (measured 4 of 5 runs with it installed
+    versus 0 of 3 without), landing inside a CUDA kernel launch during garbage
+    collection. These assertions keep the report honest whether or not a stray
+    gmpy2 install is present, so nobody has to guess why deep renders got
+    slower or why the suite started aborting.
+    """
+    backend = precision_backend()
+    assert backend in ("gmpy", "python")
+
+    from mpmath.libmp import backend as libmp_backend
+
+    # The report must come from mpmath, not from a hard-coded guess.
+    assert backend == libmp_backend.BACKEND
+    assert precision_accelerated() == (libmp_backend.gmpy is not None)
+
+
+def test_precision_accelerator_can_be_disabled_by_environment(monkeypatch):
+    """FRACTAL_PRECISION_ACCELERATOR=python opts out without uninstalling."""
+    for value in ("python", "0", "off", "none", "PYTHON"):
+        monkeypatch.setenv("FRACTAL_PRECISION_ACCELERATOR", value)
+        assert precision_accelerated() is False, value
+
+
+@pytest.mark.timeout(60)
+def test_bookmark_11_resolves_without_false_glitches():
+    """Regression for Bookmark 11 rendering mostly black after >10s.
+
+    The perturbation loop previously flagged any pixel with |δ_n| > 1e-6·|z_n|
+    as a glitch. Because |δ_n| must grow to O(1) before a pixel escapes at a
+    different iteration than the reference orbit, every escaping pixel tripped
+    the test prematurely; at HP depth all 24 re-roots resolved only 1 pixel
+    each, exhausting HP_DIRECT_BUDGET and colouring ~98% of the frame as
+    max_iterations (black). With Pauldelbrot's cancellation criterion
+    (|z_n + δ_n| < 1e-3·|z_n|), Bookmark 11 resolves on the first reference
+    orbit with zero unresolved pixels and matches direct mpmath iteration.
+    """
+    from decimal import localcontext
+
+    from deep_zoom import calculate_mandelbrot_perturb_hp
+    from hp_view import PreciseBounds, to_decimal
+
+    bounds = PreciseBounds(
+        "-0.7454642792047880926114239500072203469469114647017911168159423662093897",
+        "-0.7454642792047880926114239499078238728890639772199133175903113012705657",
+        "0.1070015880102516720129122425480928948962988038438871274687167405741447",
+        "0.1070015880102516720129122426200310929956659229088961846582672238236186",
+        precision=69,
+    )
+    # Test both at Bookmark 11's native scale and zoomed 8x deeper into HP band.
+    for scale in (1.0, 0.125):
+        b = bounds.copy()
+        if scale != 1.0:
+            cx, cy = b.center()
+            b.scale_around(cx, cy, scale)
+        w, h, max_iter = 24, 16, 8192
+        counts, stats = calculate_mandelbrot_perturb_hp(w, h, *b.to_strings(), max_iter)
+        assert stats["unresolved"] == 0, f"scale={scale}: {stats}"
+        assert stats["direct"] == 0, f"scale={scale}: {stats}"
+        # Most pixels at this location escape; the frame must not be mostly black.
+        assert (
+            int((counts < max_iter).sum()) > (w * h) // 2
+        ), f"scale={scale}: {(counts == max_iter).sum()} pixels marked black/interior"
+        assert len(np.unique(counts)) > 20
+
+        # Spot-check corner and centre pixels against direct mpmath iteration.
+        import mpmath as mp
+
+        dx_s, dy_s = b.pitch_strings(w, h)
+        dx, dy = to_decimal(dx_s), to_decimal(dy_s)
+        with localcontext(prec=120) as ctx, mp.workdps(90):
+            for i, j in ((0, 0), (h // 2, w // 2), (h - 1, w - 1)):
+                px = ctx.add(
+                    b.x_min, ctx.multiply(dx, to_decimal(j) + to_decimal("0.5"))
+                )
+                py = ctx.add(
+                    b.y_min, ctx.multiply(dy, to_decimal(i) + to_decimal("0.5"))
+                )
+                c = mp.mpc(mp.mpf(str(px)), mp.mpf(str(py)))
+                z = mp.mpc(0)
+                n = 0
+                while n < max_iter:
+                    if mp.re(z) ** 2 + mp.im(z) ** 2 > 4.0:
+                        break
+                    z = z * z + c
+                    n += 1
+                assert counts[i, j] == n, f"pixel ({i},{j}) got {counts[i, j]} != {n}"

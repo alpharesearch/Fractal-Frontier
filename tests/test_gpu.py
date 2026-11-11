@@ -47,7 +47,7 @@ class TestGPUCalculator:
         """GPU Mandelbrot iteration counts should be in valid range."""
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         iterations = gpu.calculate_mandelbrot_gpu(
             self.width,
             self.height,
@@ -64,7 +64,7 @@ class TestGPUCalculator:
         """GPU and CPU Mandelbrot should produce nearly identical results."""
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         gpu_result = gpu.calculate_mandelbrot_gpu(
             self.width,
             self.height,
@@ -95,7 +95,7 @@ class TestGPUCalculator:
         classic view (where float32 is selected by the viewer)."""
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         args = (
             self.width,
             self.height,
@@ -132,7 +132,7 @@ class TestGPUCalculator:
         """GPU Julia iteration counts should be in valid range."""
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         julia_c = complex(-0.7, 0.27015)
         iterations = gpu.calculate_julia_gpu(
             self.width, self.height, -1.5, 1.5, -1.5, 1.5, self.max_iterations, julia_c
@@ -145,7 +145,7 @@ class TestGPUCalculator:
         from fractals import julia_section_jit
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         julia_c = complex(-0.7, 0.27015)
         gpu_result = gpu.calculate_julia_gpu(
             self.width, self.height, -1.5, 1.5, -1.5, 1.5, self.max_iterations, julia_c
@@ -186,7 +186,7 @@ class TestGPUCalculator:
         """GPU Fatou iteration counts should be in valid range."""
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         iterations = gpu.calculate_fatou_gpu(
             self.width, self.height, -2.0, 2.0, -2.0, 2.0, self.max_iterations
         )
@@ -198,7 +198,7 @@ class TestGPUCalculator:
         from fractals import fatou_section_jit
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         gpu_result = gpu.calculate_fatou_gpu(
             self.width, self.height, -2.0, 2.0, -2.0, 2.0, self.max_iterations
         )
@@ -257,7 +257,7 @@ class TestGPUCalculator:
         """GPU should handle higher resolutions correctly."""
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         result = gpu.calculate_mandelbrot_gpu(
             800,
             600,
@@ -273,7 +273,7 @@ class TestGPUCalculator:
         """GPU should produce correct results for zoomed-in views."""
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
         # Region on the Mandelbrot boundary (not inside cardioid/bulb)
         zoom_x_min = -1.0
         zoom_x_max = -0.5
@@ -303,7 +303,7 @@ class TestGPUCalculator:
 
         from gpu_fractals import GPUCalculator
 
-        gpu = GPUCalculator()
+        gpu = MandelbrotCalculator.get_gpu_calculator() or GPUCalculator()
 
         # Compute-heavy: seahorse valley boundary, high iteration count.
         w, h, iters = 1920, 1080, 2000

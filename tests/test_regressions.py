@@ -304,6 +304,7 @@ def test_pixels_stay_square_after_resize(app):
         assert abs(dx - dy) / dx < 1e-9, f"pixels not square at {w}x{h}"
     # Restore the initial view for the other tests.
     viewer.width, viewer.height = 160, 120
+    viewer.draw_mandelbrot()
 
 
 def test_single_canvas_image_item_after_redraws(app):
@@ -697,6 +698,32 @@ def test_click_zooms_and_drag_pans(app):
 
     settled()
     root.withdraw()
+
+
+def test_orphan_button_release_does_not_zoom(app):
+    """An orphan <ButtonRelease-1> on the canvas without a preceding press on
+    the canvas (e.g. releasing the mouse button after double-clicking an item
+    in the Load Bookmark dialog, which destroys the Toplevel on the second
+    ButtonPress) must not trigger a click zoom."""
+    viewer, root = app
+    viewer.x_min, viewer.x_max = -2.0, 1.0
+    viewer.y_min, viewer.y_max = -1.125, 1.125
+    viewer._pan_start = None
+    viewer._pan_last = None
+    viewer._panning = False
+
+    class ReleaseEv:
+        type = "5"
+        x = 80
+        y = 60
+        widget = viewer.canvas
+
+    before = viewer.bounds.to_strings()
+    viewer._pan_release(ReleaseEv())
+    assert (
+        viewer.bounds.to_strings() == before
+    ), "orphan ButtonRelease-1 triggered fluid_zoom without a matching press"
+    assert not viewer.is_zooming
 
 
 def test_cpu_cores_randomizer_excludes_meta_theme(app):

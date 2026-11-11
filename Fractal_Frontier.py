@@ -5,6 +5,7 @@ This application provides a GUI for exploring the Mandelbrot set fractal with va
 color themes, zoom capabilities, and bookmark functionality.
 """
 
+import gc
 import json
 import math
 import multiprocessing
@@ -13,9 +14,9 @@ import platform
 import queue
 import random
 import threading
-import traceback
 import time
 import tkinter as tk
+import traceback
 from collections import OrderedDict
 from decimal import Decimal, localcontext
 from tkinter import messagebox, ttk
@@ -476,6 +477,13 @@ class MandelbrotViewer:
         self._zoom_preview_scale = 1.0
         self._zoom_slow_streak = 0
         self._zoom_fast_streak = 0
+        # Disable automatic allocation-driven cyclic GC while the background
+        # _render_worker thread is alive: Tcl/Tk objects (TkappObject,
+        # Variable, PhotoImage) are bound to the main thread and abort the
+        # interpreter if a cyclic GC pass happens to trigger on _render_worker.
+        # Cyclic GC is run explicitly on the main thread when frames settle
+        # and on viewer close.
+        gc.disable()
         self._render_thread = threading.Thread(target=self._render_worker, daemon=True)
         self._render_thread.start()
         self._poll_results()
@@ -558,6 +566,8 @@ class MandelbrotViewer:
         Args:
             event: Tkinter resize event
         """
+        if not self.canvas.winfo_ismapped():
+            return
         if self.resize_job is not None:
             self.master.after_cancel(self.resize_job)
         self.resize_job = self.master.after(300, self.redraw)
@@ -566,6 +576,9 @@ class MandelbrotViewer:
         """
         Redraw the Mandelbrot set after a resize event.
         """
+        self.resize_job = None
+        if getattr(self, "_closed", False) or not self.canvas.winfo_ismapped():
+            return
         self.width = self.canvas.winfo_width()
         self.height = self.canvas.winfo_height()
         # During window creation/resize the canvas may briefly report a
@@ -2031,6 +2044,7 @@ class MandelbrotViewer:
         if self._view_note:
             coord_str += f" | {self._view_note}"
         self.status_bar.config(text=f"{backend} | " + coord_str)
+        gc.collect(0)
 
     def _apply_render_error(self, seq, message):
         """Show a render failure in the status bar (main thread)."""
@@ -2042,6 +2056,7 @@ class MandelbrotViewer:
         """Window close handler: stop rendering, shut down the pool, destroy."""
         self._close_app()
         self.master.destroy()
+        gc.collect()
 
     def _close_app(self):
         """Idempotent cleanup of the render thread and process pool."""
@@ -2071,6 +2086,42 @@ class MandelbrotViewer:
                     joiner.join(timeout=5)
             except Exception:
                 pass
+        # Drop the PhotoImage reference and Tk widget/variable cycles while
+        # still on the main thread so their Tcl finalizers (Variable.__del__,
+        # PhotoImage.__del__, Tkapp_Dealloc / Tcl_DeleteInterp) cannot fire
+        # later during cyclic GC on another viewer's _render_worker thread.
+        self.photo = None
+        for attr in ("theme_menu", "fractal_type_menu"):
+            menu = getattr(self, attr, None)
+            if menu is not None:
+                menu._callback = None
+        master = getattr(self, "master", None)
+        if master is not None:
+            for job_attr in ("_wheel_job", "resize_job"):
+                job = getattr(self, job_attr, None)
+                if job is not None:
+                    try:
+                        master.after_cancel(job)
+                    except Exception:
+                        pass
+                    setattr(self, job_attr, None)
+            try:
+                for child in list(master.winfo_children()):
+                    child.destroy()
+            except Exception:
+                pass
+        for var_attr in (
+            "color_theme_var",
+            "auto_adjust_var",
+            "gpu_var",
+            "fractal_type_var",
+            "julia_c_real_var",
+            "julia_c_imag_var",
+            "e_exp_i_n_var",
+        ):
+            setattr(self, var_attr, None)
+        gc.collect()
+        gc.enable()
 
     def save_bookmark(self):
         """
@@ -2210,6 +2261,11 @@ class MandelbrotViewer:
                 )
                 return
             self.bounds = bounds
+            self._pan_cache = None
+            self._invalidate_tile_cache()
+            self._pan_start = None
+            self._pan_last = None
+            self._panning = False
             self._view_note = (
                 "bookmark stored double-double precision (~32 digits)" if legacy else ""
             )
@@ -2537,6 +2593,12 @@ class MandelbrotViewer:
     def _pan_release(self, event):
         """Finish a pan, or perform the plain click zoom when no drag
         happened."""
+        if self._pan_start is None and not self._panning:
+            # Ignore an orphan ButtonRelease-1 whose press occurred in another
+            # window (e.g. double-clicking an entry in the bookmark dialog
+            # destroys the dialog on ButtonPress, delivering ButtonRelease to
+            # the canvas underneath).
+            return
         panned = self._panning
         self._panning = False
         self._pan_start = None

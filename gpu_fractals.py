@@ -5,6 +5,7 @@ Provides JIT-compiled CUDA kernels for Mandelbrot, Julia, and Fatou sets
 that run on the GPU for 10-100x speedup over CPU-only approaches.
 """
 
+import gc
 import threading
 
 import numpy as np
@@ -361,34 +362,40 @@ class GPUCalculator:
         latency predictable and keeps compilation off the worker thread.
         """
         grid, block = (1, 1), (1, 1)
-        buf = cuda.device_array((1, 1), dtype=np.int32)
-        try:
-            for cast, kernels in (
-                (np.float64, (mandelbrot_kernel, julia_kernel, fatou_kernel)),
-                (
-                    np.float32,
-                    (mandelbrot_kernel_f32, julia_kernel_f32, fatou_kernel_f32),
-                ),
-            ):
-                for kernel in kernels:
-                    # The Julia kernels take the constant c as (cr, ci).
-                    tail = (0.0, 0.0) if "julia" in kernel.py_func.__name__ else ()
-                    # One thread in one block is enough to force a compile.
-                    kernel[grid, block](
-                        buf,
-                        cast(0.0),
-                        cast(1.0),
-                        cast(0.0),
-                        cast(1.0),
-                        1,
-                        1,
-                        1,
-                        *(cast(v) for v in tail),
-                    )
-        except Exception as exc:  # pragma: no cover - best-effort warmup
-            print(f"WARNING: GPU kernel precompile failed ({exc!r})")
-        finally:
-            del buf
+        with _GPU_LOCK:
+            was_gc = gc.isenabled()
+            gc.disable()
+            buf = None
+            try:
+                buf = cuda.device_array((1, 1), dtype=np.int32)
+                for cast, kernels in (
+                    (np.float64, (mandelbrot_kernel, julia_kernel, fatou_kernel)),
+                    (
+                        np.float32,
+                        (mandelbrot_kernel_f32, julia_kernel_f32, fatou_kernel_f32),
+                    ),
+                ):
+                    for kernel in kernels:
+                        # The Julia kernels take the constant c as (cr, ci).
+                        tail = (0.0, 0.0) if "julia" in kernel.py_func.__name__ else ()
+                        # One thread in one block is enough to force a compile.
+                        kernel[grid, block](
+                            buf,
+                            cast(0.0),
+                            cast(1.0),
+                            cast(0.0),
+                            cast(1.0),
+                            1,
+                            1,
+                            1,
+                            *(cast(v) for v in tail),
+                        )
+            except Exception as exc:  # pragma: no cover - best-effort warmup
+                print(f"WARNING: GPU kernel precompile failed ({exc!r})")
+            finally:
+                del buf
+                if was_gc:
+                    gc.enable()
 
     @staticmethod
     def _validate_precision(precision):
@@ -571,11 +578,23 @@ class GPUCalculator:
 
 
 def _locked(name, inner):
-    """Build a public GPU entry point that serialises access to the driver."""
+    """Build a public GPU entry point that serialises access to the driver.
+
+    Cyclic garbage collection is suspended while the lock is held so a GC pass
+    triggered by an allocation inside ``launch_kernel`` cannot run arbitrary
+    object finalizers (e.g. Tk variable/image destructors from an earlier test
+    or stale CUDA deallocations) on a worker thread mid-driver-call.
+    """
 
     def entry(self, *args, **kwargs):
         with _GPU_LOCK:
-            return inner(self, *args, **kwargs)
+            was_gc = gc.isenabled()
+            gc.disable()
+            try:
+                return inner(self, *args, **kwargs)
+            finally:
+                if was_gc:
+                    gc.enable()
 
     entry.__name__ = name
     entry.__qualname__ = f"GPUCalculator.{name}"

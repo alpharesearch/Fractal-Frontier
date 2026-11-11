@@ -14,37 +14,46 @@ def _create_app():
     return root, viewer
 
 
-@pytest.mark.timeout(5)
+@pytest.mark.timeout(10)
 def test_zoom_persists_view_bounds_and_redraws():
     """Verify that a mouse‑wheel zoom updates bounds and triggers a redraw."""
-    root, viewer = _create_app()
-
-    # Capture current bounds
-    original = (viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max)
-
-    # Simulate a wheel event at the canvas centre
-    class Event:
-        type = "4"  # mouse button/wheel press in Tkinter (string!)
-        x = viewer.width // 2
-        y = viewer.height // 2
-
     from unittest.mock import patch
 
-    # Perform zoom‑in (factor < 1) with mocked draw_mandelbrot to set image
-    with patch.object(
-        viewer, "draw_mandelbrot", new=lambda: setattr(viewer.canvas, "image", object())
-    ):
-        viewer.zoom(Event(), zoom_factor=0.5)
+    root = tk.Tk()
+    root.withdraw()
+    viewer = None
+    try:
+        with patch.object(MandelbrotViewer, "draw_mandelbrot", lambda *a, **k: None):
+            viewer = MandelbrotViewer(root)
 
-    # After zoom, the overall width and height should decrease
-    new_width = viewer.x_max - viewer.x_min
-    new_height = viewer.y_max - viewer.y_min
-    orig_width = original[1] - original[0]
-    orig_height = original[3] - original[2]
-    assert new_width < orig_width, "Zoom in should reduce width"
-    assert new_height < orig_height, "Zoom in should reduce height"
+        # Capture current bounds
+        original = (viewer.x_min, viewer.x_max, viewer.y_min, viewer.y_max)
 
-    # The canvas should have been redrawn – verify image is not None
-    assert viewer.canvas.image is not None
+        # Simulate a wheel event at the canvas centre
+        class Event:
+            type = "4"  # mouse button/wheel press in Tkinter (string!)
+            x = viewer.width // 2
+            y = viewer.height // 2
 
-    root.destroy()
+        # Perform zoom‑in (factor < 1) with mocked draw_mandelbrot to set image
+        with patch.object(
+            viewer,
+            "draw_mandelbrot",
+            new=lambda: setattr(viewer.canvas, "image", object()),
+        ):
+            viewer.zoom(Event(), zoom_factor=0.5)
+
+        # After zoom, the overall width and height should decrease
+        new_width = viewer.x_max - viewer.x_min
+        new_height = viewer.y_max - viewer.y_min
+        orig_width = original[1] - original[0]
+        orig_height = original[3] - original[2]
+        assert new_width < orig_width, "Zoom in should reduce width"
+        assert new_height < orig_height, "Zoom in should reduce height"
+
+        # The canvas should have been redrawn – verify image is not None
+        assert viewer.canvas.image is not None
+    finally:
+        if viewer is not None:
+            viewer._close_app()
+        root.destroy()

@@ -57,7 +57,12 @@ def viewer():
         # view-state implementation.
         if v is not None:
             v._close_app()
+            v = None
         root.destroy()
+        root = None
+        import gc
+
+        gc.collect()
 
 
 def deep_view(pitch="1e-34", w=400, h=300):
