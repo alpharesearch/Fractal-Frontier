@@ -1138,3 +1138,28 @@ def test_spinner_disarms_when_the_render_lands():
             root.destroy()
         except tk.TclError:
             pass
+
+
+def test_startup_configure_schedules_the_first_redraw(app, monkeypatch):
+    """The window's first <Configure> arrives while the canvas is still
+    unmapped; on_resize must still schedule a redraw.
+
+    Regression: guarding on_resize with winfo_ismapped() discarded that only
+    startup event, so the app kept the small default canvas size until the
+    user dragged a window edge.
+    """
+    viewer, root = app
+
+    class ConfEv:
+        pass
+
+    # Force the unmapped-startup condition rather than depending on how the
+    # withdrawn test window happens to be mapped at this moment.
+    monkeypatch.setattr(viewer.canvas, "winfo_ismapped", lambda: 0)
+    viewer.on_resize(ConfEv())
+    assert viewer.resize_job is not None, (
+        "the startup <Configure> was dropped, so the first frame would keep "
+        "the default canvas size until a manual resize"
+    )
+    root.after_cancel(viewer.resize_job)
+    viewer.resize_job = None

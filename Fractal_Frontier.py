@@ -566,8 +566,6 @@ class MandelbrotViewer:
         Args:
             event: Tkinter resize event
         """
-        if not self.canvas.winfo_ismapped():
-            return
         if self.resize_job is not None:
             self.master.after_cancel(self.resize_job)
         self.resize_job = self.master.after(300, self.redraw)
@@ -577,6 +575,12 @@ class MandelbrotViewer:
         Redraw the Mandelbrot set after a resize event.
         """
         self.resize_job = None
+        # Checked here, not in on_resize: the startup <Configure> arrives
+        # while the canvas is still unmapped, so guarding the event would
+        # discard the only resize the window ever gets and the first frame
+        # would keep the small default size until the user dragged the edge.
+        # By the time the debounce fires the window is mapped, and a
+        # withdrawn test window is still filtered out.
         if getattr(self, "_closed", False) or not self.canvas.winfo_ismapped():
             return
         self.width = self.canvas.winfo_width()
